@@ -25,15 +25,10 @@ const logger = winston.createLogger({
 });
 
 // Load private key
-const privkeyBytes = fs.readFileSync("privkey.pem");
+const privkeyBytes = fs.readFileSync("private.key", 'utf8').trim();
 
-// Create private key from PEM format
-const privkeyObj = crypto.createPrivateKey({
-    key: privkeyBytes,
-    format: 'pem',
-    type: 'pkcs8',
-    namedCurve: 'prime256v1'
-});
+// Create private key from raw bytes
+const privkeyObj = Buffer.from(privkeyBytes, 'hex');
 
 // Initialize firehose queues
 const firehoseQueues = new Set();
