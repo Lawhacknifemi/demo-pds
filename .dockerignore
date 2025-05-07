@@ -1,0 +1,27 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Git
+.git
+.gitignore
+
+# Environment
+.env
+*.env
+
+# Data files
+*.db
+data/*
+
+# IDE
+.vscode
+.idea
+
+# Logs
+logs
+*.log
+
+# Docker
+Dockerfile
+.dockerignore 
