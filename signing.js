@@ -142,10 +142,12 @@ function applyLowSMitigation(signature, curve = 'secp256k1') {
 }
 
 function rawSign(privateKey, data) {
-    const sign = createSign('SHA256');
-    sign.update(data);
-    const signature = sign.sign(privateKey, 'base64');
-    return applyLowSMitigation(Buffer.from(signature, 'base64'), 'prime256v1');
+    const msgHash = sha256(data);
+    const signature = secp256k1.sign(msgHash, privateKey);
+    return Buffer.concat([
+        Buffer.from(signature.r.toString(16).padStart(64, '0'), 'hex'),
+        Buffer.from(signature.s.toString(16).padStart(64, '0'), 'hex')
+    ]);
 }
 
 async function hashToCid(data, codec = "dag-cbor") {
