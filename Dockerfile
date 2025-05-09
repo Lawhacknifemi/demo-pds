@@ -24,7 +24,7 @@ USER appuser
 # Create a startup script
 RUN echo '#!/bin/bash\n\
 # Check if we need to create identity\n\
-if [ ! -f "/data/private.key" ]; then\n\
+if [ ! -f "/data/private.key" ] && [ ! -f "private.key" ]; then\n\
     echo "Creating new identity..."\n\
     # Run create_did.js and capture the DID\n\
     DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
@@ -39,6 +39,10 @@ if [ ! -f "/data/private.key" ]; then\n\
     fi\n\
 else\n\
     echo "Using existing identity..."\n\
+    # If private.key exists in root but not in /data, move it\n\
+    if [ -f "private.key" ] && [ ! -f "/data/private.key" ]; then\n\
+        mv private.key /data/\n\
+    fi\n\
 fi\n\
 \n\
 # Always ensure private.key is in the correct location\n\
