@@ -13,9 +13,12 @@ RUN npm install
 # Copy all project files
 COPY . .
 
+# Create data directory for persistent storage
+RUN mkdir -p /data
+
 # Create a non-root user
 RUN useradd -m appuser
-RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /app /data
 USER appuser
 
 # Create a startup script
@@ -49,9 +52,6 @@ sed -i "s/app\.listen(PORT, .127.0.0.1./app.listen(PORT, .0.0.0.0./" pds.js\n\
 # Start the PDS\n\
 exec node pds.js' > /app/start.sh && \
 chmod +x /app/start.sh
-
-# Create data directory for persistent storage
-RUN mkdir -p /data && chown -R appuser:appuser /data
 
 # Expose the port the app runs on
 EXPOSE 31337
