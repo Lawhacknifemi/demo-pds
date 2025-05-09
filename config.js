@@ -6,7 +6,7 @@ const BGS_SERVER = "bsky.network";
 // Instance-specific Configuration
 const HANDLE = "jpdshandle.memory-design.xyz";
 const PDS_SERVER = "jpd.memory-design.xyz";
-const DID_PLC = "did:plc:hc4hffkuktpkcao6xh7jhizf";
+const DID_PLC = "did:plc:g4nauhkiceeizleswpuwwqox";
 
 // Security Credentials
 const JWT_ACCESS_SECRET = "281e1a58a26cfbdbddcb183378174604b76bea9ffe6ff658c91cd3530613a829";
