@@ -12,16 +12,17 @@ import { writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import base32Encode from 'base32-encode';
+import config from './config.js';
 
 const require = createRequire(import.meta.url);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Configuration (replace with your actual values)
-const HANDLE = 'sheriflawal.pds-demo.com';
-const PDS_SERVER = 'pds.1xnull.try';
-const PLC_SERVER = 'https://plc.directory';
+// Configuration from config.js
+const HANDLE = config.HANDLE;
+const PDS_SERVER = config.PDS_SERVER;
+const PLC_SERVER = `https://${config.PLC_SERVER}`;
 
 // Curve order for secp256k1 (from signing.py)
 const CURVE_ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
