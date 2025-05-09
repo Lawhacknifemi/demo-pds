@@ -348,8 +348,8 @@ async function initServer() {
 
         // Start server
         const PORT = process.env.PORT || 31337;
-        const server = app.listen(PORT, '127.0.0.1', () => {
-            logger.info(`PDS server started at http://127.0.0.1:${PORT}`);
+        const server = app.listen(PORT, '0.0.0.0', () => {
+            console.log(`PDS server running on port ${PORT}`);
         });
 
         // Handle process termination
