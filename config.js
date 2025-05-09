@@ -4,8 +4,8 @@ const APPVIEW_SERVER = "bsky.network";
 const BGS_SERVER = "bsky.network";
 
 // Instance-specific Configuration
-const HANDLE = "sheriflawal.pds-demo.com";
-const PDS_SERVER = "pds.1xnull.try";
+const HANDLE = "jpdshandle.memory-design.xyz";
+const PDS_SERVER = "jpd.memory-design.xyz";
 const DID_PLC = "did:plc:mbdzvqkfxdudqe2jhxo3mosj";
 
 // Security Credentials
