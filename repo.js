@@ -245,12 +245,12 @@ class Repo {
             this.con.get(
                 "SELECT value FROM records WHERE collection = ? AND rkey = ?",
                 [collection, rkey],
-                (err, row) => {
+                async (err, row) => {
                     if (err) reject(err);
                     if (!row) reject(new Error("Record not found"));
                     
                     const value = row.value;
-                    const cid = CID.decode(value);
+                    const cid = await hashToCid(value);
                     const uri = `at://${this.did}/${collection}/${rkey}`;
                     
                     resolve([uri, cid, value]);

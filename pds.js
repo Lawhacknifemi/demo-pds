@@ -5,6 +5,7 @@ import fs from 'fs';
 import { promisify } from 'util';
 import { CID } from 'multiformats/cid';
 import * as dagCbor from '@ipld/dag-cbor';
+import { base32 } from 'multiformats/bases/base32';
 import crypto from 'crypto';
 import { Repo } from './repo.js';
 import { recordToJson, jsonToRecord } from './recordSerdes.js';
@@ -249,7 +250,7 @@ async function repoCreateRecord(req, res) {
 
         res.json({
             uri,
-            cid: cid.toString('base32')
+            cid: cid.toString(base32)
         });
     } catch (err) {
         console.error('Error in repoCreateRecord:', err);
@@ -285,11 +286,11 @@ async function repoGetRecord(req, res) {
         
         if (repoDid === repo.did) {
             const [uri, cid, value] = await repo.getRecord(collection, rkey);
-            res.json(recordToJson({
+            res.json({
                 uri,
                 cid: cid.toString('base32'),
                 value: dagCbor.decode(value)
-            }));
+            });
         } else {
             const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.repo.getRecord?${new URLSearchParams(req.query)}`, {
                 headers: getAppviewAuth()
