@@ -39,9 +39,10 @@ if [ ! -f "/data/private.key" ]; then\n\
     fi\n\
 else\n\
     echo "Using existing identity..."\n\
-    # Copy private key from volume\n\
-    cp /data/private.key .\n\
 fi\n\
+\n\
+# Always ensure private.key is in the correct location\n\
+cp /data/private.key .\n\
 \n\
 # Modify pds.js to listen on all interfaces\n\
 sed -i "s/app\.listen(PORT, .127.0.0.1./app.listen(PORT, .0.0.0.0./" pds.js\n\
