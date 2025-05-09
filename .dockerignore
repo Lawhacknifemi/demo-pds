@@ -13,6 +13,7 @@ npm-debug.log
 # Data files
 *.db
 data/*
+!private.key
 
 # IDE
 .vscode
