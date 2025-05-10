@@ -19,18 +19,19 @@ const payload = {
 // Make request
 async function requestCrawl() {
     try {
+        // Create a JWK from the private key
+        const jwk = {
+            kty: 'EC',
+            crv: 'secp256k1',
+            d: privateKey.toString('base64url'),
+            x: secp256k1.getPublicKey(privateKey, false).slice(1, 33).toString('base64url'),
+            y: secp256k1.getPublicKey(privateKey, false).slice(33).toString('base64url')
+        };
+
         // Create JWT with ES256K and apply low-s mitigation
         const jwt = await new SignJWT(payload)
             .setProtectedHeader({ alg: 'ES256K', typ: 'JWT' })
-            .sign(privateKey, {
-                // Custom sign function to apply low-s mitigation
-                sign: async (data) => {
-                    const signature = await secp256k1.sign(data, privateKey);
-                    const derSignature = signature.toDER();
-                    const mitigatedSignature = applyLowSMitigation(derSignature);
-                    return mitigatedSignature;
-                }
-            });
+            .sign(jwk);
 
         console.log('Requesting crawl with JWT:', jwt);
         const response = await fetch(

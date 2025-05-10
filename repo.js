@@ -174,8 +174,13 @@ class Repo {
 
     async createRecord(collection, record, rkey = null) {
         try {
-            console.log('Encoding record:', record);
-            const value = dagCbor.encode(record);
+            // Remove undefined values from record
+            const cleanRecord = Object.fromEntries(
+                Object.entries(record).filter(([_, v]) => v !== undefined)
+            );
+            
+            console.log('Encoding record:', cleanRecord);
+            const value = dagCbor.encode(cleanRecord);
             console.log('Encoded value:', value);
             
             console.log('Creating CID...');
@@ -208,7 +213,7 @@ class Repo {
                 op: 'create',
                 uri,
                 cid: cid.bytes.toString('hex'),
-                record
+                record: cleanRecord
             });
             console.log('Created firehose message:', firehoseMsg);
             
