@@ -136,9 +136,15 @@ class Repo {
                     prev: null,
                     sig: null  // Will be set after signing
                 };
-                commit.sig = rawSign(this.signingKey, dagCbor.encode(commit));
-                const commitBlob = dagCbor.encode(commit);
+                
+                // Clean the commit object before encoding
+                const cleanCommit = Object.fromEntries(
+                    Object.entries(commit).filter(([_, v]) => v !== undefined)
+                );
+                
+                const commitBlob = dagCbor.encode(cleanCommit);
                 const commitCid = await hashToCid(commitBlob);
+                cleanCommit.sig = rawSign(this.signingKey, commitBlob);
 
                 this.con.serialize(() => {
                     this.con.run(
