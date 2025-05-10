@@ -23,11 +23,17 @@ RUN echo '#!/bin/bash\n\
 # Check if we need to create identity\n\
 if [ ! -f "private.key" ]; then\n\
     echo "Creating new identity..."\n\
+    # First, create a temporary config without DID_PLC\n\
+    sed -i "/DID_PLC/d" config.js\n\
     # Run create_did.js and capture the DID\n\
     DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
     if [ -n "$DID" ]; then\n\
         echo "Generated DID: $DID"\n\
-        echo "Please update config.js manually with this DID"\n\
+        echo "Updating config.js with new DID..."\n\
+        # Add the new DID_PLC to config.js\n\
+        sed -i "/const PDS_SERVER/a\\const DID_PLC = \"$DID\";" config.js\n\
+        # Run request_crawl.js after successful identity creation\n\
+        node request_crawl.js\n\
     else\n\
         echo "Failed to create identity"\n\
         exit 1\n\
