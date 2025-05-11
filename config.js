@@ -1,6 +1,6 @@
 // Server Configuration
 const PLC_SERVER = "plc.directory";
-const APPVIEW_SERVER = "bsky.network";
+const APPVIEW_SERVER = "public.api.bsky.app";
 const BGS_SERVER = "bsky.network";
 
 // Instance-specific Configuration
