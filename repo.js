@@ -9,6 +9,8 @@ import { rawSign } from './signing.js';
 import { serialise } from './carfile.js';
 import { randomInt } from 'crypto';
 import { createHash } from 'crypto';
+import pkg from 'base64url';
+const { base64url } = pkg;
 
 const B32_CHARSET = "234567abcdefghijklmnopqrstuvwxyz";
 
@@ -74,6 +76,26 @@ class ATNode extends MSTNode {
             }
         }
     }
+}
+
+// Add this helper function before the Repo class
+function cleanObject(obj) {
+    if (obj === null || obj === undefined) {
+        return null;
+    }
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+    if (Array.isArray(obj)) {
+        return obj.map(cleanObject);
+    }
+    const cleaned = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value !== undefined) {
+            cleaned[key] = cleanObject(value);
+        }
+    }
+    return cleaned;
 }
 
 class Repo {
@@ -177,14 +199,17 @@ class Repo {
             
             const recordKey = `${collection}/${rkey}`;
             
+            // Clean the record before processing
+            const cleanRecord = cleanObject(record);
+            
             // Handle blob references
             const referencedBlobs = new Set();
-            for (const cid of enumerateRecordCids(record)) {
+            for (const cid of enumerateRecordCids(cleanRecord)) {
                 referencedBlobs.add(cid);
                 await this.increfBlob(cid);
             }
             
-            const value = dagCbor.encode(record);
+            const value = dagCbor.encode(cleanRecord);
             const valueCid = await hashToCid(value);
             const dbBlockInserts = [[Buffer.from(valueCid.bytes), value]];
             
@@ -210,13 +235,13 @@ class Repo {
             
             // Create new commit
             const newCommitRev = tidNow();
-            const commit = {
+            const commit = cleanObject({
                 version: 3,
                 data: this.tree.cid,
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
-            };
+            });
             
             const commitBlob = dagCbor.encode(commit);
             commit.sig = rawSign(this.signingKey, commitBlob);
@@ -239,7 +264,7 @@ class Repo {
             const uri = `at://${this.did}/${recordKey}`;
             
             // Create firehose message
-            const firehoseMsg = dagCbor.encode({
+            const firehoseMsg = dagCbor.encode(cleanObject({
                 t: "#commit",
                 op: 1,
                 ops: [{
@@ -258,7 +283,7 @@ class Repo {
                 commit: commitCid,
                 rebase: false,
                 tooBig: false
-            });
+            }));
             
             return [uri, valueCid, firehoseMsg];
         } catch (error) {
@@ -296,13 +321,13 @@ class Repo {
         
         // Create new commit
         const newCommitRev = tidNow();
-        const commit = {
+        const commit = cleanObject({
             version: 3,
             data: this.tree.cid,
             rev: newCommitRev,
             prev: null,
             did: this.did
-        };
+        });
         
         const commitBlob = dagCbor.encode(commit);
         commit.sig = rawSign(this.signingKey, commitBlob);
@@ -320,7 +345,7 @@ class Repo {
             [prevCommit.commit_seq + 1, Buffer.from(commitCid.bytes)]);
         
         // Create firehose message
-        const firehoseMsg = dagCbor.encode({
+        const firehoseMsg = dagCbor.encode(cleanObject({
             t: "#commit",
             op: 1,
             ops: [{
@@ -339,7 +364,7 @@ class Repo {
             commit: commitCid,
             rebase: false,
             tooBig: false
-        });
+        }));
         
         return firehoseMsg;
     }
