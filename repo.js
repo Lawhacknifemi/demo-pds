@@ -147,13 +147,13 @@ class Repo {
         this.con.get("SELECT * FROM commits WHERE commit_seq=0", async (err, row) => {
             if (err) throw err;
             if (!row) {
-                const commit = {
+                const commit = cleanObject({
                     version: 3,
                     data: this.tree.cid.toString(),
                     rev: tidNow(),
                     did: this.did,
                     prev: null
-                };
+                });
                 
                 const commitBlob = dagCbor.encode(commit);
                 const commitCid = await hashToCid(commitBlob);
