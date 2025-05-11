@@ -2,7 +2,8 @@ import { readFileSync } from 'fs';
 import fetch from 'node-fetch';
 import config from './config.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
-import { base64url } from 'base64url';
+import pkg from 'base64url';
+const { base64url } = pkg;
 
 // Read private key and convert from hex to binary
 const privateKeyHex = readFileSync('private.key', 'utf8');
