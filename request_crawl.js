@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import fetch from 'node-fetch';
 import config from './config.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { sha256 } from '@noble/hashes/sha256';
 import base64url from 'base64url';
 
 // Read private key and convert from hex to binary
@@ -24,8 +25,11 @@ async function requestCrawl() {
         const encodedPayload = base64url(JSON.stringify(payload));
         const signingInput = `${encodedHeader}.${encodedPayload}`;
 
+        // Hash the signing input before signing (matching Python implementation)
+        const msgHash = sha256(Buffer.from(signingInput));
+        
         // Sign the JWT
-        const signature = await secp256k1.sign(signingInput, privateKey);
+        const signature = await secp256k1.sign(msgHash, privateKey);
         const encodedSignature = base64url(signature.toDER());
         const jwt = `${signingInput}.${encodedSignature}`;
 
