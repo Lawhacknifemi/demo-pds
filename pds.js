@@ -70,27 +70,34 @@ function getAppviewAuth() {
 
 function jwtAccessSubject(token) {
     try {
+        console.log('Verifying JWT with secret:', config.JWT_ACCESS_SECRET);
         const payload = jwt.verify(token, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
+        console.log('JWT payload:', payload);
         
         if (payload.scope !== "com.atproto.access") {
+            console.error('Invalid JWT scope:', payload.scope);
             throw new Error("invalid jwt scope");
         }
         
         const now = Math.floor(Date.now() / 1000);
         if (!payload.iat || payload.iat > now) {
+            console.error('Invalid JWT iat:', payload.iat, 'now:', now);
             throw new Error("invalid jwt: issued in the future");
         }
         
         if (!payload.exp || payload.exp < now) {
+            console.error('Invalid JWT exp:', payload.exp, 'now:', now);
             throw new Error("invalid jwt: expired");
         }
         
         if (!payload.sub) {
+            console.error('Missing JWT sub field');
             throw new Error("invalid jwt: no subject");
         }
         
         return payload.sub;
     } catch (err) {
+        console.error('JWT verification error:', err);
         throw new Error("invalid jwt");
     }
 }
