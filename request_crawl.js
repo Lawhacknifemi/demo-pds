@@ -2,8 +2,7 @@ import { readFileSync } from 'fs';
 import fetch from 'node-fetch';
 import config from './config.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
-import pkg from 'base64url';
-const { base64url } = pkg;
+import base64url from 'base64url';
 
 // Read private key and convert from hex to binary
 const privateKeyHex = readFileSync('private.key', 'utf8');
@@ -21,13 +20,13 @@ async function requestCrawl() {
     try {
         // Create JWT header and payload
         const header = { alg: 'ES256K', typ: 'JWT' };
-        const encodedHeader = base64url.encode(JSON.stringify(header));
-        const encodedPayload = base64url.encode(JSON.stringify(payload));
+        const encodedHeader = base64url(JSON.stringify(header));
+        const encodedPayload = base64url(JSON.stringify(payload));
         const signingInput = `${encodedHeader}.${encodedPayload}`;
 
         // Sign the JWT
         const signature = await secp256k1.sign(signingInput, privateKey);
-        const encodedSignature = base64url.encode(signature.toDER());
+        const encodedSignature = base64url(signature.toDER());
         const jwt = `${signingInput}.${encodedSignature}`;
 
         console.log('Requesting crawl with JWT:', jwt);
