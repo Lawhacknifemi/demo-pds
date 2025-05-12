@@ -155,7 +155,9 @@ async function serverCreateSession(req, res) {
         scope: "com.atproto.access",
         sub: config.DID_PLC,
         iat: now,
-        exp: now + 60 * 60 * 24 // 24h
+        exp: now + 60 * 60 * 24, // 24h
+        aud: "com.atproto.access",
+        iss: config.DID_PLC
     }, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
 
     return res.json({
