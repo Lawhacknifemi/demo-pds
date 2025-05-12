@@ -94,6 +94,16 @@ function jwtAccessSubject(token) {
             console.error('Missing JWT sub field');
             throw new Error("invalid jwt: no subject");
         }
+
+        if (payload.aud !== "com.atproto.access") {
+            console.error('Invalid JWT audience:', payload.aud);
+            throw new Error("invalid jwt: wrong audience");
+        }
+
+        if (payload.iss !== config.DID_PLC) {
+            console.error('Invalid JWT issuer:', payload.iss);
+            throw new Error("invalid jwt: wrong issuer");
+        }
         
         return payload.sub;
     } catch (err) {
