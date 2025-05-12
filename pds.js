@@ -161,23 +161,28 @@ async function serverCreateSession(req, res) {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const accessJwt = jwt.sign({
+    const payload = {
         scope: "com.atproto.access",
         sub: config.DID_PLC,
         iat: now,
         exp: now + 60 * 60 * 24, // 24h
         aud: "com.atproto.access",
         iss: config.DID_PLC
-    }, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
+    };
 
-    console.log('Created JWT with payload:', {
-        scope: "com.atproto.access",
-        sub: config.DID_PLC,
-        iat: now,
-        exp: now + 60 * 60 * 24,
-        aud: "com.atproto.access",
-        iss: config.DID_PLC
-    });
+    console.log('Creating JWT with payload:', payload);
+    console.log('Using JWT secret:', config.JWT_ACCESS_SECRET);
+
+    const accessJwt = jwt.sign(payload, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
+    console.log('Generated JWT:', accessJwt);
+
+    // Verify the token immediately after creation
+    try {
+        const verified = jwt.verify(accessJwt, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
+        console.log('Successfully verified generated JWT:', verified);
+    } catch (err) {
+        console.error('Failed to verify generated JWT:', err);
+    }
 
     return res.json({
         accessJwt,
