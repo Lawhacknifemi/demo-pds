@@ -170,6 +170,15 @@ async function serverCreateSession(req, res) {
         iss: config.DID_PLC
     }, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
 
+    console.log('Created JWT with payload:', {
+        scope: "com.atproto.access",
+        sub: config.DID_PLC,
+        iat: now,
+        exp: now + 60 * 60 * 24,
+        aud: "com.atproto.access",
+        iss: config.DID_PLC
+    });
+
     return res.json({
         accessJwt,
         refreshJwt: "todo",
