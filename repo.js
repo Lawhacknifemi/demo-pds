@@ -55,6 +55,28 @@ function timestampStrNow() {
     return dtToStr(new Date());
 }
 
+function enumerateRecordCids(obj) {
+    const cids = new Set();
+    function traverse(value) {
+        if (value === null || value === undefined) {
+            return;
+        }
+        if (typeof value === 'string' && value.startsWith('bafy')) {
+            try {
+                cids.add(CID.parse(value));
+            } catch (e) {
+                // Not a valid CID
+            }
+        } else if (Array.isArray(value)) {
+            value.forEach(traverse);
+        } else if (typeof value === 'object') {
+            Object.values(value).forEach(traverse);
+        }
+    }
+    traverse(obj);
+    return cids;
+}
+
 class ATNode extends MSTNode {
     constructor(data) {
         super(data);
@@ -179,7 +201,7 @@ class Repo {
         // Load existing records
         this.con.each("SELECT record_key, record_cid FROM records", (err, row) => {
             if (err) throw err;
-            this.tree.put(row.record_key, CID.parse(row.record_cid));
+            this.tree.put(row.record_key, CID.decode(row.record_cid));
         });
     }
 
@@ -405,18 +427,25 @@ class Repo {
 
     async getRecord(collection, rkey) {
         return new Promise((resolve, reject) => {
+            const recordKey = `${collection}/${rkey}`;
             this.con.get(
-                "SELECT value FROM records WHERE collection = ? AND rkey = ?",
-                [collection, rkey],
-                async (err, row) => {
-                    if (err) reject(err);
-                    if (!row) reject(new Error("Record not found"));
-                    
-                    const value = row.value;
-                    const cid = await hashToCid(value);
-                    const uri = `at://${this.did}/${collection}/${rkey}`;
-                    
-                    resolve([uri, cid, value]);
+                "SELECT record_cid FROM records WHERE record_key = ?",
+                [recordKey],
+                (err, row) => {
+                    if (err) return reject(err);
+                    if (!row) return reject(new Error("Record not found"));
+                    const recordCid = CID.decode(row.record_cid);
+                    this.con.get(
+                        "SELECT block_value FROM blocks WHERE block_cid = ?",
+                        [row.record_cid],
+                        async (err2, row2) => {
+                            if (err2) return reject(err2);
+                            if (!row2) return reject(new Error("Block not found for record"));
+                            const value = row2.block_value;
+                            const uri = `at://${this.did}/${collection}/${rkey}`;
+                            resolve([uri, recordCid, value]);
+                        }
+                    );
                 }
             );
         });

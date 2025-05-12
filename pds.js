@@ -295,7 +295,7 @@ async function repoGetRecord(req, res) {
             const [uri, cid, value] = await repo.getRecord(collection, rkey);
             res.json({
                 uri,
-                cid: cid.toString('base32'),
+                cid: cid.toString(),
                 value: dagCbor.decode(value)
             });
         } else {
