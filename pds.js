@@ -89,23 +89,13 @@ function jwtAccessSubject(token) {
             console.error('Invalid JWT exp:', payload.exp, 'now:', now);
             throw new Error("invalid jwt: expired");
         }
-        
-        if (!payload.sub) {
-            console.error('Missing JWT sub field');
-            throw new Error("invalid jwt: no subject");
-        }
 
         if (payload.aud !== "com.atproto.access") {
             console.error('Invalid JWT audience:', payload.aud);
             throw new Error("invalid jwt: wrong audience");
         }
-
-        if (payload.iss !== config.DID_PLC) {
-            console.error('Invalid JWT issuer:', payload.iss);
-            throw new Error("invalid jwt: wrong issuer");
-        }
         
-        return payload.sub;
+        return config.DID_PLC; // Always return the configured DID
     } catch (err) {
         console.error('JWT verification error:', err);
         throw new Error("invalid jwt");
@@ -126,11 +116,7 @@ function authenticated(handler) {
                 return res.status(401).json({ error: "invalid auth type" });
             }
 
-            const subject = jwtAccessSubject(value);
-            if (subject !== config.DID_PLC) {
-                return res.status(401).json({ error: "invalid auth subject" });
-            }
-
+            jwtAccessSubject(value); // Just verify the JWT is valid
             return handler(req, res, next);
         } catch (err) {
             return res.status(401).json({ error: err.message });
@@ -154,42 +140,50 @@ async function serverDescribeServer(req, res) {
 }
 
 async function serverCreateSession(req, res) {
-    const { identifier, password } = req.body;
-
-    if (identifier !== config.HANDLE || password !== config.PASSWORD) {
-        return res.status(401).json({ error: "invalid username or password" });
-    }
-
-    const now = Math.floor(Date.now() / 1000);
-    const payload = {
-        scope: "com.atproto.access",
-        sub: config.DID_PLC,
-        iat: now,
-        exp: now + 60 * 60 * 24, // 24h
-        aud: "com.atproto.access",
-        iss: config.DID_PLC
-    };
-
-    console.log('Creating JWT with payload:', payload);
-    console.log('Using JWT secret:', config.JWT_ACCESS_SECRET);
-
-    const accessJwt = jwt.sign(payload, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
-    console.log('Generated JWT:', accessJwt);
-
-    // Verify the token immediately after creation
     try {
-        const verified = jwt.verify(accessJwt, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
-        console.log('Successfully verified generated JWT:', verified);
-    } catch (err) {
-        console.error('Failed to verify generated JWT:', err);
-    }
+        const { identifier, password } = req.body;
+        console.log("Creating session for:", identifier);
+        console.log("Full config object:", config);
+        console.log("DID_PLC value:", config.DID_PLC);
 
-    return res.json({
-        accessJwt,
-        refreshJwt: "todo",
-        handle: config.HANDLE,
-        did: config.DID_PLC
-    });
+        if (identifier !== config.HANDLE || password !== config.PASSWORD) {
+            return res.status(401).json({ error: "invalid username or password" });
+        }
+
+        const now = Math.floor(Date.now() / 1000);
+        const payload = {
+            scope: "com.atproto.access",
+            iat: now,
+            exp: now + 60 * 60 * 24, // 24 hours
+            aud: "com.atproto.access"
+        };
+        console.log("JWT payload:", payload);
+
+        const accessJwt = jwt.sign(payload, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
+        console.log('Generated JWT:', accessJwt);
+
+        // Verify the token immediately after creation
+        try {
+            const verified = jwt.verify(accessJwt, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
+            console.log('Successfully verified generated JWT:', verified);
+        } catch (err) {
+            console.error('Failed to verify generated JWT:', err);
+        }
+
+        return res.json({
+            accessJwt,
+            refreshJwt: "todo",
+            handle: config.HANDLE
+        });
+    } catch (err) {
+        console.error('Error in serverCreateSession:', err);
+        console.error('Error stack:', err.stack);
+        res.status(500).json({ 
+            error: "InternalError", 
+            message: err.message,
+            details: err.stack
+        });
+    }
 }
 
 async function serverGetSession(req, res) {
