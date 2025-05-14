@@ -25,18 +25,19 @@ const logger = winston.createLogger({
     ]
 });
 
-// Load private key if it exists
+// Load private key
 let privkeyObj;
 try {
     const privkeyBytes = fs.readFileSync("private.key", 'utf8').trim();
-    privkeyObj = Buffer.from(privkeyBytes, 'hex');
-} catch (err) {
-    if (err.code === 'ENOENT') {
-        logger.info('No private key found, identity will be created during startup');
-        privkeyObj = null;
-    } else {
-        throw err;
+    // Ensure the private key is in the correct format
+    if (!privkeyBytes.match(/^[0-9a-fA-F]{64}$/)) {
+        throw new Error('Invalid private key format');
     }
+    privkeyObj = Buffer.from(privkeyBytes, 'hex');
+    logger.info('Private key loaded successfully');
+} catch (err) {
+    logger.error('Failed to load private key:', err);
+    process.exit(1);
 }
 
 // Initialize firehose queues
