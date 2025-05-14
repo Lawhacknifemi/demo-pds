@@ -25,11 +25,19 @@ const logger = winston.createLogger({
     ]
 });
 
-// Load private key
-const privkeyBytes = fs.readFileSync("private.key", 'utf8').trim();
-
-// Create private key from raw bytes
-const privkeyObj = Buffer.from(privkeyBytes, 'hex');
+// Load private key if it exists
+let privkeyObj;
+try {
+    const privkeyBytes = fs.readFileSync("private.key", 'utf8').trim();
+    privkeyObj = Buffer.from(privkeyBytes, 'hex');
+} catch (err) {
+    if (err.code === 'ENOENT') {
+        logger.info('No private key found, identity will be created during startup');
+        privkeyObj = null;
+    } else {
+        throw err;
+    }
+}
 
 // Initialize firehose queues
 const firehoseQueues = new Set();
@@ -40,6 +48,10 @@ const appviewAuthCache = new Map();
 const APPVIEW_AUTH_TTL = 60 * 60 * 1000; // 1 hour in milliseconds
 
 function getAppviewAuth() {
+    if (!privkeyObj) {
+        throw new Error('Private key not available');
+    }
+    
     const now = Date.now();
     const cached = appviewAuthCache.get('auth');
     if (cached && (now - cached.timestamp) < APPVIEW_AUTH_TTL) {
