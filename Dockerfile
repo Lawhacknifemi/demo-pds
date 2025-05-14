@@ -1,8 +1,13 @@
-# Use Node.js LTS version
+# Use Node.js LTS version with slim variant
 FROM node:20-slim
 
 # Set working directory
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY package*.json ./
@@ -18,10 +23,10 @@ RUN useradd -m appuser
 RUN chown -R appuser:appuser /app
 USER appuser
 
-# Create a startup script
+# Create a startup script with improved error handling
 RUN echo '#!/bin/bash\n\
 # Check if we need to create identity\n\
-if [ ! -f "private.key" ] || ! grep -q "DID_PLC" config.js; then\n\
+if [ ! -f "private.key" ] && ! grep -q "DID_PLC" config.js; then\n\
     echo "Creating new identity..."\n\
     # Run create_did.js and capture the DID\n\
     DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
