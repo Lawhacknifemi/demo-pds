@@ -26,7 +26,7 @@ USER appuser
 # Create a startup script with improved error handling
 RUN echo '#!/bin/bash\n\
 # Check if we need to create identity\n\
-if [ ! -f "private.key" ] && [ ! -f "config.js" ] || ! grep -q "DID_PLC" config.js 2>/dev/null; then\n\
+if [ ! -f "private.key" ] || [ ! -f "config.js" ] || ! grep -q "DID_PLC" config.js 2>/dev/null; then\n\
     echo "Creating new identity..."\n\
     # Run create_did.js and capture the DID\n\
     DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
