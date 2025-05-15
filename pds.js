@@ -531,6 +531,30 @@ async function repoUploadBlob(req, res) {
     }
 }
 
+async function bskyFeedGetAuthorFeed(req, res) {
+    try {
+        const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/app.bsky.feed.getAuthorFeed?${new URLSearchParams(req.query)}`, {
+            headers: getAppviewAuth()
+        });
+        const data = await response.json();
+        res.status(response.status).json(data);
+    } catch (err) {
+        res.status(500).json({ error: "InternalError", message: err.message });
+    }
+}
+
+async function bskyActorGetProfile(req, res) {
+    try {
+        const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/app.bsky.actor.getProfile?${new URLSearchParams(req.query)}`, {
+            headers: getAppviewAuth()
+        });
+        const data = await response.json();
+        res.status(response.status).json(data);
+    } catch (err) {
+        res.status(500).json({ error: "InternalError", message: err.message });
+    }
+}
+
 async function initServer() {
     try {
         // Initialize repository
@@ -567,6 +591,8 @@ async function initServer() {
         app.post('/xrpc/com.atproto.repo.deleteRecord', authenticated(repoDeleteRecord));
         app.get('/xrpc/com.atproto.repo.getRecord', authenticated(repoGetRecord));
         app.post('/xrpc/com.atproto.repo.uploadBlob', authenticated(repoUploadBlob));
+        app.get('/xrpc/app.bsky.feed.getAuthorFeed', authenticated(bskyFeedGetAuthorFeed));
+        app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
 
         // Start server
         const PORT = process.env.PORT || 31337;
