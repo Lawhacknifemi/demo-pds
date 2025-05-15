@@ -5,72 +5,16 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import base64url from 'base64url';
 
-// Read private key from PEM file
-const privateKeyPem = readFileSync('privkey.pem', 'utf8');
-// Extract the private key bytes from the PEM
-const privateKeyBase64 = privateKeyPem
-    .replace('-----BEGIN PRIVATE KEY-----', '')
-    .replace('-----END PRIVATE KEY-----', '')
-    .replace(/\s/g, '');
-const privateKeyDer = Buffer.from(privateKeyBase64, 'base64');
-// The last 32 bytes of the DER are the actual private key
-const privateKey = privateKeyDer.slice(-32);
+// Read private key and convert from hex to binary
+const privateKeyHex = readFileSync('private.key', 'utf8');
+const privateKey = Buffer.from(privateKeyHex, 'hex');
 
-// Create JWT payload
+// Create JWT
 const payload = {
     iss: config.DID_PLC,
     aud: `did:web:${config.BGS_SERVER}`,
     exp: Math.floor(Date.now() / 1000) + 60 * 60 // 1h
 };
-
-// Make request
-async function requestCrawl() {
-    try {
-        // Create JWT header and payload
-        const header = { alg: 'ES256K', typ: 'JWT' };
-        const encodedHeader = base64url(JSON.stringify(header));
-        const encodedPayload = base64url(JSON.stringify(payload));
-        const signingInput = `${encodedHeader}.${encodedPayload}`;
-
-        // Hash the signing input
-        const msgHash = sha256(Buffer.from(signingInput));
-        
-        // Sign the JWT
-        const signature = secp256k1.sign(msgHash, privateKey);
-        
-        // Convert signature to raw bytes
-        const r = Buffer.from(signature.r.toString(16).padStart(64, '0'), 'hex');
-        const s = Buffer.from(signature.s.toString(16).padStart(64, '0'), 'hex');
-        const rawSignature = Buffer.concat([r, s]);
-        
-        // Convert to DER format
-        const derSignature = rawToDer(rawSignature);
-        const encodedSignature = base64url(derSignature);
-        
-        const token = `${signingInput}.${encodedSignature}`;
-
-        console.log('Requesting crawl with JWT:', token);
-        const response = await fetch(
-            `https://${config.BGS_SERVER}/xrpc/com.atproto.sync.requestCrawl`,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    hostname: config.PDS_SERVER
-                })
-            }
-        );
-
-        console.log('Status:', response.ok, response.status);
-        const content = await response.text();
-        console.log('Response:', content);
-    } catch (error) {
-        console.error('Error:', error);
-    }
-}
 
 // Function to convert raw signature to DER format
 function rawToDer(rawSignature) {
@@ -119,6 +63,55 @@ function rawToDer(rawSignature) {
     sVal.copy(der, offset);
     
     return der;
+}
+
+// Make request
+async function requestCrawl() {
+    try {
+        // Create JWT header and payload
+        const header = { alg: 'ES256K', typ: 'JWT' };
+        const encodedHeader = base64url(JSON.stringify(header));
+        const encodedPayload = base64url(JSON.stringify(payload));
+        const signingInput = `${encodedHeader}.${encodedPayload}`;
+
+        // Hash the signing input before signing (matching Python implementation)
+        const msgHash = sha256(Buffer.from(signingInput));
+        
+        // Sign the JWT
+        const signature = await secp256k1.sign(msgHash, privateKey);
+        
+        // Convert signature to raw bytes
+        const r = Buffer.from(signature.r.toString(16).padStart(64, '0'), 'hex');
+        const s = Buffer.from(signature.s.toString(16).padStart(64, '0'), 'hex');
+        const rawSignature = Buffer.concat([r, s]);
+        
+        // Convert to DER format
+        const derSignature = rawToDer(rawSignature);
+        const encodedSignature = base64url(derSignature);
+        
+        const jwt = `${signingInput}.${encodedSignature}`;
+
+        console.log('Requesting crawl with JWT:', jwt);
+        const response = await fetch(
+            `https://${config.BGS_SERVER}/xrpc/com.atproto.sync.requestCrawl`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${jwt}`
+                },
+                body: JSON.stringify({
+                    hostname: config.PDS_SERVER
+                })
+            }
+        );
+
+        console.log('Status:', response.ok, response.status);
+        const content = await response.text();
+        console.log('Response:', content);
+    } catch (error) {
+        console.error('Error:', error);
+    }
 }
 
 requestCrawl(); 
