@@ -10,7 +10,22 @@ import { serialise } from './carfile.js';
 import { randomInt } from 'crypto';
 import { createHash } from 'crypto';
 import pkg from 'base64url';
+import winston from 'winston';
 const { base64url } = pkg;
+
+// Initialize logging with Python-like format
+const logger = winston.createLogger({
+    level: 'debug',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.printf(({ level, message, timestamp }) => {
+            return `${timestamp} ${level.toUpperCase()}: ${message}`;
+        })
+    ),
+    transports: [
+        new winston.transports.Console()
+    ]
+});
 
 const B32_CHARSET = "234567abcdefghijklmnopqrstuvwxyz";
 
@@ -221,6 +236,8 @@ class Repo {
 
     async createRecord(collection, record, rkey = null) {
         try {
+            logger.debug(`Creating record in collection: ${collection}, rkey: ${rkey}`);
+            
             if (!rkey) {
                 rkey = tidNow();
             }
@@ -229,6 +246,7 @@ class Repo {
             
             // Clean the record before processing
             const cleanRecord = cleanObject(record);
+            logger.debug('Cleaned record:', cleanRecord);
             
             // Handle blob references
             const referencedBlobs = new Set();
@@ -326,6 +344,7 @@ class Repo {
                 });
             });
             
+            logger.info(`Record created successfully. URI: at://${this.did}/${recordKey}, CID: ${valueCid}`);
             return [`at://${this.did}/${recordKey}`, valueCid, firehoseBlob];
         } catch (err) {
             logger.error('Error in createRecord:', err);
