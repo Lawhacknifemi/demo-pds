@@ -28,8 +28,8 @@ RUN echo '#!/bin/bash\n\
 # Check if we need to create identity\n\
 if [ ! -f "privkey.pem" ] || ! grep -q "DID_PLC" config.js; then\n\
     echo "Creating new identity..."\n\
-    # Run create_identity.js and capture the DID\n\
-    DID=$(node create_identity.js | grep "Created DID:" | cut -d" " -f3)\n\
+    # Run create_did.js and capture the DID\n\
+    DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
     if [ -n "$DID" ]; then\n\
         echo "Updating config.js with DID: $DID"\n\
         # Update config.js with the new DID\n\
