@@ -212,16 +212,29 @@ async function firehoseBroadcast(msg) {
     logger.info('Broadcasting firehose message to all connected clients');
     logger.debug('Firehose message content:', msg.toString());
     
-    let clientCount = 0;
-    for (const queue of firehoseQueues) {
-        try {
-            await queue.put(msg);
-            clientCount++;
-        } catch (err) {
-            logger.error('Error broadcasting to firehose queue:', err);
-        }
+    // Use a lock to prevent queue modifications during broadcast
+    const lockKey = 'broadcast';
+    if (firehoseQueuesLock.get(lockKey)) {
+        logger.warn('Broadcast already in progress, waiting...');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return firehoseBroadcast(msg);
     }
-    logger.info(`Message broadcast to ${clientCount} clients`);
+    
+    firehoseQueuesLock.set(lockKey, true);
+    try {
+        let clientCount = 0;
+        for (const queue of firehoseQueues) {
+            try {
+                await queue.put(msg);
+                clientCount++;
+            } catch (err) {
+                logger.error('Error broadcasting to firehose queue:', err);
+            }
+        }
+        logger.info(`Message broadcast to ${clientCount} clients`);
+    } finally {
+        firehoseQueuesLock.delete(lockKey);
+    }
 }
 
 // Route handlers
@@ -317,64 +330,82 @@ async function syncSubscribeRepos(req, res) {
     logger.debug('Request headers:', req.headers);
     logger.debug('Request query:', req.query);
     
-    // Upgrade the HTTP connection to WebSocket
-    const ws = new WebSocketServer({ noServer: true });
+    // Set proper headers for WebSocket upgrade
+    res.setHeader('Upgrade', 'websocket');
+    res.setHeader('Connection', 'Upgrade');
+    res.setHeader('Sec-WebSocket-Accept', crypto
+        .createHash('sha1')
+        .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+        .digest('base64'));
     
-    ws.on('connection', (socket, req) => {
-        const clientId = Math.random().toString(36).substring(7);
-        logger.info(`New firehose client connected [${clientId}]`);
-        logger.debug(`Client IP: ${req.socket.remoteAddress}`);
-        
-        // Create a new queue for this client
-        const queue = {
-            put: async (msg) => {
-                if (socket.readyState === 1) { // WebSocket.OPEN
-                    try {
-                        socket.send(msg);
-                        logger.debug(`Message sent to client [${clientId}]`);
-                    } catch (err) {
-                        logger.error(`Error sending message to client [${clientId}]:`, err);
-                        socket.close();
-                    }
-                } else {
-                    logger.warn(`Client [${clientId}] not in OPEN state (state: ${socket.readyState})`);
-                }
+    // Create a queue for this client
+    const queue = {
+        messages: [],
+        put: async (msg) => {
+            queue.messages.push(msg);
+        },
+        get: async () => {
+            if (queue.messages.length === 0) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                return queue.get();
             }
-        };
-        
-        // Add to firehose queues
+            return queue.messages.shift();
+        }
+    };
+    
+    // Add to firehose queues with lock
+    const lockKey = 'queue_add';
+    if (firehoseQueuesLock.get(lockKey)) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return syncSubscribeRepos(req, res);
+    }
+    
+    firehoseQueuesLock.set(lockKey, true);
+    try {
         firehoseQueues.add(queue);
-        logger.info(`Client [${clientId}] added to firehose queues. Total clients: ${firehoseQueues.size}`);
-        
-        // Handle client disconnect
-        socket.on('close', () => {
-            logger.info(`Firehose client disconnected [${clientId}]`);
-            firehoseQueues.delete(queue);
-            logger.info(`Client [${clientId}] removed from firehose queues. Remaining clients: ${firehoseQueues.size}`);
-        });
-        
-        // Handle errors
-        socket.on('error', (err) => {
-            logger.error(`WebSocket error for client [${clientId}]:`, err);
-            firehoseQueues.delete(queue);
-        });
-
-        // Handle pings
-        socket.on('ping', () => {
-            logger.debug(`Received ping from client [${clientId}]`);
-        });
-
-        // Handle pongs
-        socket.on('pong', () => {
-            logger.debug(`Received pong from client [${clientId}]`);
-        });
-    });
+        logger.info(`New firehose client connected. Total clients: ${firehoseQueues.size}`);
+    } finally {
+        firehoseQueuesLock.delete(lockKey);
+    }
     
     // Handle the upgrade
     const server = req.socket.server;
     server.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
         logger.info('WebSocket connection upgraded successfully');
-        ws.emit('connection', ws, req);
+        
+        // Handle WebSocket connection
+        ws.on('message', async (data) => {
+            try {
+                const msg = await queue.get();
+                ws.send(msg, { binary: true });
+            } catch (err) {
+                logger.error('Error sending message:', err);
+                ws.close();
+            }
+        });
+        
+        ws.on('close', () => {
+            logger.info('Firehose client disconnected');
+            // Remove from firehose queues with lock
+            const lockKey = 'queue_remove';
+            if (firehoseQueuesLock.get(lockKey)) {
+                setTimeout(() => {
+                    firehoseQueues.delete(queue);
+                }, 100);
+            } else {
+                firehoseQueuesLock.set(lockKey, true);
+                try {
+                    firehoseQueues.delete(queue);
+                } finally {
+                    firehoseQueuesLock.delete(lockKey);
+                }
+            }
+        });
+        
+        ws.on('error', (err) => {
+            logger.error('WebSocket error:', err);
+            firehoseQueues.delete(queue);
+        });
     });
 }
 
