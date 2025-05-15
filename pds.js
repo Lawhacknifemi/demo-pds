@@ -15,6 +15,8 @@ import { rawSign } from './signing.js';
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import base64url from 'base64url';
+import { WebSocketServer } from 'ws';
+import http from 'http';
 
 // Initialize logging
 const logger = winston.createLogger({
@@ -207,9 +209,19 @@ function authenticated(handler) {
 }
 
 async function firehoseBroadcast(msg) {
+    logger.info('Broadcasting firehose message to all connected clients');
+    logger.debug('Firehose message content:', msg.toString());
+    
+    let clientCount = 0;
     for (const queue of firehoseQueues) {
-        await queue.put(msg);
+        try {
+            await queue.put(msg);
+            clientCount++;
+        } catch (err) {
+            logger.error('Error broadcasting to firehose queue:', err);
+        }
     }
+    logger.info(`Message broadcast to ${clientCount} clients`);
 }
 
 // Route handlers
@@ -301,8 +313,69 @@ async function identityResolveHandle(req, res) {
 }
 
 async function syncSubscribeRepos(req, res) {
-    // WebSocket implementation would go here
-    res.status(501).json({ error: "NotImplemented" });
+    logger.info('New WebSocket subscription request received');
+    logger.debug('Request headers:', req.headers);
+    logger.debug('Request query:', req.query);
+    
+    // Upgrade the HTTP connection to WebSocket
+    const ws = new WebSocketServer({ noServer: true });
+    
+    ws.on('connection', (socket, req) => {
+        const clientId = Math.random().toString(36).substring(7);
+        logger.info(`New firehose client connected [${clientId}]`);
+        logger.debug(`Client IP: ${req.socket.remoteAddress}`);
+        
+        // Create a new queue for this client
+        const queue = {
+            put: async (msg) => {
+                if (socket.readyState === 1) { // WebSocket.OPEN
+                    try {
+                        socket.send(msg);
+                        logger.debug(`Message sent to client [${clientId}]`);
+                    } catch (err) {
+                        logger.error(`Error sending message to client [${clientId}]:`, err);
+                        socket.close();
+                    }
+                } else {
+                    logger.warn(`Client [${clientId}] not in OPEN state (state: ${socket.readyState})`);
+                }
+            }
+        };
+        
+        // Add to firehose queues
+        firehoseQueues.add(queue);
+        logger.info(`Client [${clientId}] added to firehose queues. Total clients: ${firehoseQueues.size}`);
+        
+        // Handle client disconnect
+        socket.on('close', () => {
+            logger.info(`Firehose client disconnected [${clientId}]`);
+            firehoseQueues.delete(queue);
+            logger.info(`Client [${clientId}] removed from firehose queues. Remaining clients: ${firehoseQueues.size}`);
+        });
+        
+        // Handle errors
+        socket.on('error', (err) => {
+            logger.error(`WebSocket error for client [${clientId}]:`, err);
+            firehoseQueues.delete(queue);
+        });
+
+        // Handle pings
+        socket.on('ping', () => {
+            logger.debug(`Received ping from client [${clientId}]`);
+        });
+
+        // Handle pongs
+        socket.on('pong', () => {
+            logger.debug(`Received pong from client [${clientId}]`);
+        });
+    });
+    
+    // Handle the upgrade
+    const server = req.socket.server;
+    server.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+        logger.info('WebSocket connection upgraded successfully');
+        ws.emit('connection', ws, req);
+    });
 }
 
 async function syncGetRepo(req, res) {
@@ -341,29 +414,32 @@ let repo;
 
 async function repoCreateRecord(req, res) {
     try {
-        console.log('Received request body:', req.body);
+        logger.info('Creating new record');
+        logger.debug('Request body:', req.body);
+        
         const record = jsonToRecord(req.body);
-        console.log('Converted record:', record);
+        logger.debug('Converted record:', record);
         
         if (record.repo !== config.DID_PLC) {
             throw new Error("Invalid repo");
         }
 
         const { collection, rkey, record: recordData } = record;
-        console.log('Creating record with:', { collection, rkey, recordData });
+        logger.info(`Creating record in collection: ${collection}, rkey: ${rkey}`);
         
         const [uri, cid, firehoseMsg] = await repo.createRecord(collection, recordData, rkey);
-        console.log('Created record:', { uri, cid, firehoseMsg });
+        logger.info(`Record created successfully. URI: ${uri}, CID: ${cid}`);
         
         await firehoseBroadcast(firehoseMsg);
+        logger.info('Firehose message broadcast completed');
 
         res.json({
             uri,
             cid: cid.toString(base32)
         });
     } catch (err) {
-        console.error('Error in repoCreateRecord:', err);
-        console.error('Error stack:', err.stack);
+        logger.error('Error in repoCreateRecord:', err);
+        logger.error('Error stack:', err.stack);
         res.status(500).json({ 
             error: "InternalError", 
             message: err.message,
@@ -428,10 +504,16 @@ async function initServer() {
     try {
         // Initialize repository
         repo = await Repo.create(config.DID_PLC, "repo.db", privkeyObj);
-        console.log('Repository initialized successfully');
+        logger.info('Repository initialized successfully');
 
         // Initialize Express app
         const app = express();
+        const server = http.createServer(app);
+        
+        // Initialize WebSocket server
+        const wss = new WebSocketServer({ server });
+        logger.info('WebSocket server initialized');
+        
         app.use(cors({
             origin: '*',
             methods: '*',
@@ -457,19 +539,20 @@ async function initServer() {
 
         // Start server
         const PORT = process.env.PORT || 31337;
-        const server = app.listen(PORT, '0.0.0.0', () => {
-            console.log(`PDS server running on port ${PORT}`);
+        server.listen(PORT, '0.0.0.0', () => {
+            logger.info(`PDS server running on port ${PORT}`);
+            logger.info(`WebSocket endpoint available at ws://localhost:${PORT}/xrpc/com.atproto.sync.subscribeRepos`);
         });
 
         // Handle process termination
         const shutdown = async () => {
-            console.log('Shutting down server...');
+            logger.info('Shutting down server...');
             try {
                 await new Promise((resolve) => server.close(resolve));
-                console.log('Server closed');
+                logger.info('Server closed');
                 process.exit(0);
             } catch (err) {
-                console.error('Error during shutdown:', err);
+                logger.error('Error during shutdown:', err);
                 process.exit(1);
             }
         };
@@ -477,17 +560,17 @@ async function initServer() {
         process.on('SIGINT', shutdown);
         process.on('SIGTERM', shutdown);
         process.on('uncaughtException', (err) => {
-            console.error('Uncaught exception:', err);
+            logger.error('Uncaught exception:', err);
             shutdown();
         });
         process.on('unhandledRejection', (reason, promise) => {
-            console.error('Unhandled rejection at:', promise, 'reason:', reason);
+            logger.error('Unhandled rejection at:', promise, 'reason:', reason);
             shutdown();
         });
 
         return { app, server };
     } catch (err) {
-        console.error('Failed to initialize server:', err);
+        logger.error('Failed to initialize server:', err);
         process.exit(1);
     }
 }
