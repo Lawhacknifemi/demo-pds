@@ -216,7 +216,7 @@ class Repo {
     async createRecord(collection, record, rkey = null) {
         try {
             if (!rkey) {
-                rkey = tidNow();
+                rkey = tidNow().toString();
             }
             
             const recordKey = `${collection}/${rkey}`;
@@ -239,75 +239,71 @@ class Repo {
             const newBlocks = new Set();
             this.tree = this.tree.put(recordKey, valueCid, newBlocks);
             for (const block of newBlocks) {
-                dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
+                if (block && block.cid && block.serialised) {
+                    dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
+                }
             }
             
-            // Get previous commit
+            // Get previous commit and its sequence
             const prevCommit = await new Promise((resolve, reject) => {
                 this.con.get(
-                    "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
+                    "SELECT commit_seq, commit_cid FROM commits ORDER BY commit_seq DESC LIMIT 1",
                     (err, row) => {
                         if (err) reject(err);
-                        resolve(row);
+                        else resolve(row);
                     }
                 );
             });
             
-            const prevCommitData = dagCbor.decode(prevCommit.block_value);
+            const nextCommitSeq = prevCommit ? prevCommit.commit_seq + 1 : 0;
             
             // Create new commit
-            const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid,
-                rev: newCommitRev,
-                prev: null,
-                did: this.did
+                data: this.tree.cid.toString(),
+                rev: tidNow(),
+                did: this.did,
+                prev: prevCommit ? CID.decode(prevCommit.commit_cid).toString() : null
             });
             
             const commitBlob = dagCbor.encode(commit);
-            commit.sig = rawSign(this.signingKey, commitBlob);
             const commitCid = await hashToCid(commitBlob);
-            dbBlockInserts.push([Buffer.from(commitCid.bytes), commitBlob]);
+            commit.sig = rawSign(this.signingKey, commitBlob);
             
-            // Store blocks
-            for (const [cid, data] of dbBlockInserts) {
-                this.con.run("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)", [cid, data]);
-            }
+            // Insert all blocks
+            await new Promise((resolve, reject) => {
+                this.con.serialize(() => {
+                    const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
+                    for (const [cid, value] of dbBlockInserts) {
+                        stmt.run(cid, value);
+                    }
+                    stmt.finalize();
+                    
+                    // Insert commit
+                    this.con.run(
+                        "INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)",
+                        [nextCommitSeq, Buffer.from(commitCid.bytes)],
+                        (err) => {
+                            if (err) reject(err);
+                            else resolve();
+                        }
+                    );
+                });
+            });
             
-            // Store record
-            this.con.run("INSERT OR REPLACE INTO records (record_key, record_cid) VALUES (?, ?)", 
-                [recordKey, Buffer.from(valueCid.bytes)]);
+            // Insert record
+            await new Promise((resolve, reject) => {
+                this.con.run(
+                    "INSERT INTO records (record_key, record_cid) VALUES (?, ?)",
+                    [recordKey, Buffer.from(valueCid.bytes)],
+                    (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    }
+                );
+            });
             
-            // Store commit
-            this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)",
-                [prevCommit.commit_seq + 1, Buffer.from(commitCid.bytes)]);
-            
-            const uri = `at://${this.did}/${recordKey}`;
-            
-            // Create firehose message
-            const firehoseMsg = dagCbor.encode(cleanObject({
-                t: "#commit",
-                op: 1,
-                ops: [{
-                    cid: valueCid,
-                    path: recordKey,
-                    action: "create"
-                }],
-                seq: Date.now() * 1000,
-                rev: newCommitRev,
-                since: prevCommitData.rev,
-                prev: null,
-                repo: this.did,
-                time: timestampStrNow(),
-                blobs: Array.from(referencedBlobs),
-                blocks: serialise([commitCid], dbBlockInserts),
-                commit: commitCid,
-                rebase: false,
-                tooBig: false
-            }));
-            
-            return [uri, valueCid, firehoseMsg];
+            return [recordKey, valueCid, commitBlob];
         } catch (error) {
             console.error('Error in createRecord:', error);
             throw error;
@@ -316,6 +312,8 @@ class Repo {
 
     async deleteRecord(collection, rkey) {
         const recordKey = `${collection}/${rkey}`;
+        const newBlocks = new Set();
+        this.tree = this.tree.delete(recordKey, newBlocks);
         const [uri, cid, value] = await this.getRecord(collection, rkey);
         const recordData = dagCbor.decode(value);
         
@@ -324,14 +322,10 @@ class Repo {
             await this.decrefBlob(blobCid);
         }
         
-        // Update MST
-        const newBlocks = new Set();
-        this.tree = this.tree.delete(recordKey, newBlocks);
-        
         // Get previous commit
         const prevCommit = await new Promise((resolve, reject) => {
             this.con.get(
-                "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
+                "SELECT commit_seq, commit_cid, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
                 (err, row) => {
                     if (err) reject(err);
                     resolve(row);

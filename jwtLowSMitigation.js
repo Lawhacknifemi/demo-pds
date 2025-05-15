@@ -1,131 +1,212 @@
-import crypto from 'crypto';
-import { createSign } from 'crypto';
+// Compatible JWT Low-S Signature Patch (matching Python implementation)
+import jwt from 'jsonwebtoken'; // or your preferred JWT library
 
-// P-256 curve parameters
-const P256_N = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+// Constants for curve orders (matching Python's format)
+const CURVE_ORDER = {
+  'secp256r1': BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551'),
+  'prime256v1': BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551'), // Same as secp256r1
+  'secp256k1': BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
+};
 
 /**
- * Converts a DER-encoded signature to raw format (64 bytes)
- * @param {Buffer} derSignature - The DER-encoded signature
- * @returns {Buffer} - The raw signature (64 bytes)
+ * Decodes a DER signature to extract r and s values
+ * @param {Buffer} derSig - The DER-encoded signature
+ * @returns {Object} - Object containing r and s as BigInts
  */
-function derToRaw(derSignature) {
-    let offset = 0;
-    if (derSignature[offset++] !== 0x30) throw new Error('Invalid DER signature');
-    const totalLength = derSignature[offset++];
-    
-    // Parse r
-    if (derSignature[offset++] !== 0x02) throw new Error('Invalid DER signature');
-    const rLength = derSignature[offset++];
-    const r = derSignature.slice(offset, offset + rLength);
-    offset += rLength;
-    
-    // Parse s
-    if (derSignature[offset++] !== 0x02) throw new Error('Invalid DER signature');
-    const sLength = derSignature[offset++];
-    const s = derSignature.slice(offset, offset + sLength);
-    
-    // Pad r and s to 32 bytes each
-    const rPadded = Buffer.alloc(32);
-    const sPadded = Buffer.alloc(32);
-    r.copy(rPadded, 32 - r.length);
-    s.copy(sPadded, 32 - s.length);
-    
-    // Concatenate r and s
-    return Buffer.concat([rPadded, sPadded]);
+function decodeDssSignature(derSig) {
+  let offset = 0;
+  
+  // Verify the sequence tag
+  if (derSig[offset++] !== 0x30) throw new Error('Invalid DER signature: not a sequence');
+  
+  // Get sequence length (skip)
+  const seqLength = derSig[offset++];
+  
+  // Parse r
+  if (derSig[offset++] !== 0x02) throw new Error('Invalid DER signature: r value not an integer');
+  const rLength = derSig[offset++];
+  const rValue = derSig.slice(offset, offset + rLength);
+  offset += rLength;
+  
+  // Parse s
+  if (derSig[offset++] !== 0x02) throw new Error('Invalid DER signature: s value not an integer');
+  const sLength = derSig[offset++];
+  const sValue = derSig.slice(offset, offset + sLength);
+  
+  // Convert to BigInt
+  const r = bufferToBigInt(rValue);
+  const s = bufferToBigInt(sValue);
+  
+  return { r, s };
 }
 
 /**
- * Applies low-s mitigation to a DER-encoded signature
- * @param {Buffer} derSignature - The DER-encoded signature
- * @returns {Buffer} - The modified DER-encoded signature
+ * Encodes r and s values into a DER signature
+ * @param {BigInt} r - The r value
+ * @param {BigInt} s - The s value
+ * @returns {Buffer} - The DER-encoded signature
  */
-export function applyLowSMitigation(derSignature) {
-    try {
-        // Parse the DER signature
-        let offset = 0;
-        if (derSignature[offset++] !== 0x30) throw new Error('Invalid DER signature');
-        const totalLength = derSignature[offset++];
-        
-        // Parse r
-        if (derSignature[offset++] !== 0x02) throw new Error('Invalid DER signature');
-        const rLength = derSignature[offset++];
-        const r = derSignature.slice(offset, offset + rLength);
-        offset += rLength;
-        
-        // Parse s
-        if (derSignature[offset++] !== 0x02) throw new Error('Invalid DER signature');
-        const sLength = derSignature[offset++];
-        const s = derSignature.slice(offset, offset + sLength);
-        
-        // Convert s to a big integer
-        const sBigInt = BigInt('0x' + s.toString('hex'));
-        
-        // If s > n/2, replace s with n - s
-        if (sBigInt > P256_N / 2n) {
-            const newS = P256_N - sBigInt;
-            // Convert back to buffer
-            const newSHex = newS.toString(16).padStart(sLength * 2, '0');
-            const newSBuffer = Buffer.from(newSHex, 'hex');
-            
-            // Reconstruct the DER signature
-            const newDer = Buffer.alloc(derSignature.length);
-            derSignature.copy(newDer, 0, 0, offset - sLength);
-            newSBuffer.copy(newDer, offset - sLength);
-            derSignature.copy(newDer, offset, offset + sLength);
-            
-            return newDer;
-        }
-    } catch (error) {
-        console.error('Error processing signature:', error);
-        throw error;
+function encodeDssSignature(r, s) {
+  // Convert to Buffers
+  const rBuf = bigIntToBuffer(r);
+  const sBuf = bigIntToBuffer(s);
+  
+  // Prepare r buffer (ensure positive integer format)
+  const rPositive = (rBuf[0] & 0x80) ? Buffer.concat([Buffer.from([0]), rBuf]) : rBuf;
+  const sPositive = (sBuf[0] & 0x80) ? Buffer.concat([Buffer.from([0]), sBuf]) : sBuf;
+  
+  // Calculate lengths
+  const rLength = rPositive.length;
+  const sLength = sPositive.length;
+  const sequenceLength = 2 + rLength + 2 + sLength;
+  
+  // Create the DER signature
+  const derSignature = Buffer.alloc(2 + sequenceLength);
+  let offset = 0;
+  
+  // Sequence tag and length
+  derSignature[offset++] = 0x30;
+  derSignature[offset++] = sequenceLength;
+  
+  // r value
+  derSignature[offset++] = 0x02;
+  derSignature[offset++] = rLength;
+  rPositive.copy(derSignature, offset);
+  offset += rLength;
+  
+  // s value
+  derSignature[offset++] = 0x02;
+  derSignature[offset++] = sLength;
+  sPositive.copy(derSignature, offset);
+  
+  return derSignature;
+}
+
+/**
+ * Convert Buffer to BigInt
+ * @param {Buffer} buf - Buffer to convert
+ * @returns {BigInt} - The resulting BigInt
+ */
+function bufferToBigInt(buf) {
+  return BigInt('0x' + buf.toString('hex'));
+}
+
+/**
+ * Convert BigInt to Buffer with minimal representation
+ * @param {BigInt} num - BigInt to convert
+ * @returns {Buffer} - The resulting Buffer
+ */
+function bigIntToBuffer(num) {
+  // Convert to hex and remove '0x' prefix
+  let hex = num.toString(16);
+  // Ensure even length
+  if (hex.length % 2 !== 0) hex = '0' + hex;
+  return Buffer.from(hex, 'hex');
+}
+
+/**
+ * Apply low-S mitigation to a signature
+ * Direct equivalent of the Python apply_low_s_mitigation function
+ * @param {Buffer} signature - The DER signature
+ * @param {string} curve - Curve name (secp256r1, secp256k1, etc.)
+ * @returns {Buffer} - Mitigated DER signature
+ */
+function applyLowSMitigation(signature, curve) {
+  // Get the curve order
+  const curveName = typeof curve === 'string' ? curve : 'secp256r1';
+  const n = CURVE_ORDER[curveName];
+  
+  if (!n) {
+    throw new Error(`Unsupported curve: ${curveName}`);
+  }
+  
+  // Decode the signature to get r and s
+  const { r, s } = decodeDssSignature(signature);
+  
+  // Apply low-S mitigation: if s > n/2, replace with n-s
+  if (s > n / 2n) {
+    const newS = n - s;
+    return encodeDssSignature(r, newS);
+  }
+  
+  return signature;
+}
+
+/**
+ * Patch the JWT library to use low-S signatures
+ * @param {Object} jwtLib - The JWT library to patch
+ */
+export function patchJWT(jwtLib = jwt) {
+  // Store reference to original sign function
+  const originalSign = jwtLib.sign;
+  
+  // Replace sign function for ECDSA algorithms
+  jwtLib.sign = function(payload, key, options, callback) {
+    // Handle callback style
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    }
+    options = options || {};
+    
+    // Non-ECDSA algorithms pass through unchanged
+    if (!options.algorithm || !options.algorithm.startsWith('ES')) {
+      return originalSign.call(this, payload, key, options, callback);
     }
     
-    return derSignature;
+    // Get curve name based on algorithm
+    let curveName;
+    switch (options.algorithm) {
+      case 'ES256':
+        curveName = 'secp256r1'; 
+        break;
+      case 'ES256K':
+        curveName = 'secp256k1';
+        break;
+      // Add more curve mappings as needed
+      default:
+        curveName = 'secp256r1'; // Default
+    }
+    
+    try {
+      // Call original sign function
+      const token = originalSign.call(this, payload, key, options);
+      
+      // Parse the token
+      const parts = token.split('.');
+      if (parts.length !== 3) {
+        throw new Error('Invalid JWT format');
+      }
+      
+      // Extract and decode the signature
+      const signatureBase64 = parts[2];
+      const signature = Buffer.from(signatureBase64, 'base64url');
+      
+      // Apply low-S mitigation
+      const mitigatedSignature = applyLowSMitigation(signature, curveName);
+      
+      // Replace the signature in the token
+      const mitigatedSignatureBase64 = mitigatedSignature.toString('base64url');
+      const mitigatedToken = `${parts[0]}.${parts[1]}.${mitigatedSignatureBase64}`;
+      
+      if (callback) {
+        callback(null, mitigatedToken);
+        return;
+      }
+      return mitigatedToken;
+    } catch (error) {
+      if (callback) {
+        callback(error);
+        return;
+      }
+      throw error;
+    }
+  };
+  
+  return jwtLib;
 }
 
-/**
- * Patches the JWT signing function to use low-s signatures
- * @param {Object} jwt - The JWT library instance
- */
-export function patchJWTForLowS(jwt) {
-    // Store the original sign function
-    const originalSign = jwt.sign;
-    
-    // Create a new sign function that applies low-s mitigation
-    jwt.sign = function(payload, key, options = {}) {
-        if (options.algorithm && options.algorithm.startsWith('ES')) {
-            // Create the header
-            const header = {
-                alg: options.algorithm,
-                typ: 'JWT'
-            };
-            
-            // Encode header and payload
-            const encodedHeader = Buffer.from(JSON.stringify(header)).toString('base64url');
-            const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-            
-            // Create the signing input
-            const signingInput = `${encodedHeader}.${encodedPayload}`;
-            
-            // Create the signer
-            const signer = createSign('SHA256');
-            signer.update(signingInput);
-            
-            // Get the original signature in base64 format
-            const signature = signer.sign(key, 'base64');
-            
-            // Convert base64 to buffer
-            const signatureBuffer = Buffer.from(signature, 'base64');
-            
-            // Apply low-s mitigation to the DER signature
-            const mitigatedSignature = applyLowSMitigation(signatureBuffer);
-            
-            // Construct the final JWT
-            return `${signingInput}.${mitigatedSignature.toString('base64url')}`;
-        }
-        
-        // For non-ECDSA algorithms, use the original sign function
-        return originalSign.call(this, payload, key, options);
-    };
-} 
+// Usage example:
+// import jwt from 'jsonwebtoken';
+// patchJWT(jwt);
+// const token = jwt.sign({data: 'example'}, privateKey, { algorithm: 'ES256' });
