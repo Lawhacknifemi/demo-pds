@@ -23,30 +23,12 @@ RUN useradd -m appuser
 RUN chown -R appuser:appuser /app
 USER appuser
 
-# Create a startup script with improved error handling
+# Create a startup script that uses our specific config
 RUN echo '#!/bin/bash\n\
-# Check if we need to create identity\n\
-if [ ! -f "private.key" ] || [ ! -f "config.js" ] || ! grep -q "DID_PLC" config.js 2>/dev/null; then\n\
-    echo "Creating new identity..."\n\
-    # Run create_did.js and capture the DID\n\
-    DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
-    if [ -n "$DID" ]; then\n\
-        echo "Updating config.js with DID: $DID"\n\
-        # Update config.js with the new DID\n\
-        sed -i "s/DID_PLC = .*/DID_PLC = \"$DID\";/" config.js\n\
-        # Run request_crawl.js after successful identity creation\n\
-        node request_crawl.js\n\
-    else\n\
-        echo "Failed to create identity"\n\
-        exit 1\n\
-    fi\n\
-else\n\
-    echo "Using existing identity..."\n\
-    # Ensure config.js exists and has DID_PLC\n\
-    if [ ! -f "config.js" ] || ! grep -q "DID_PLC" config.js 2>/dev/null; then\n\
-        echo "Error: config.js is missing or invalid"\n\
-        exit 1\n\
-    fi\n\
+# Ensure config.js exists with our specific DID\n\
+if [ ! -f "config.js" ]; then\n\
+    echo "Error: config.js is missing"\n\
+    exit 1\n\
 fi\n\
 \n\
 # Start the PDS\n\
