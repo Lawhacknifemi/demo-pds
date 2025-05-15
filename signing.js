@@ -4,11 +4,7 @@ import { Buffer } from 'buffer';
 import { createSign, createHash } from 'crypto';
 
 // Constants for curve orders (matching Python's format)
-const CURVE_ORDER = {
-    'secp256k1': BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141'),
-    'secp256r1': BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551'),
-    'prime256v1': BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551')
-};
+const CURVE_ORDER = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
 
 /**
  * Converts a Buffer to a BigInt
@@ -30,6 +26,43 @@ function bufferToBigInt(buf) {
  */
 function bigIntToBuffer(num, length) {
     return Buffer.from(num.toString(16).padStart(length * 2, '0'), 'hex');
+}
+
+/**
+ * Applies low-S mitigation to a signature.
+ * @param {Object} signature - The signature object from secp256k1
+ * @returns {Object} - The mitigated signature
+ */
+function applyLowSMitigation(signature) {
+    const { r, s } = signature;
+    if (s > CURVE_ORDER / 2n) {
+        return { r, s: CURVE_ORDER - s };
+    }
+    return signature;
+}
+
+/**
+ * Creates a raw signature matching Python's implementation.
+ * @param {Buffer} privateKey - The private key buffer
+ * @param {Buffer} data - The data to sign
+ * @returns {Buffer} - The raw signature (r||s)
+ */
+function rawSign(privkey, data) {
+    // Pre-hash the message like Python does
+    const msgHash = sha256(data);
+    
+    // Sign the hash
+    const signature = secp256k1.sign(msgHash, privkey);
+    
+    // Apply low-S mitigation
+    const mitigated = applyLowSMitigation(signature);
+    
+    // Convert to raw bytes format matching Python's output
+    const rBytes = mitigated.r.toString(16).padStart(64, '0');
+    const sBytes = mitigated.s.toString(16).padStart(64, '0');
+    
+    // Combine r and s into a single buffer, each exactly 32 bytes
+    return Buffer.from(rBytes + sBytes, 'hex');
 }
 
 /**
@@ -118,36 +151,6 @@ function rawToDer(rawSignature) {
     sVal.copy(der, offset);
     
     return der;
-}
-
-/**
- * Applies low-S mitigation to a signature.
- * @param {Buffer} signature - The DER signature to mitigate
- * @param {string} curve - The curve name ('secp256k1' or 'secp256r1')
- * @returns {Buffer} - The mitigated DER signature
- */
-function applyLowSMitigation(signature, curve = 'secp256k1') {
-    const r = BigInt('0x' + signature.slice(0, 32).toString('hex'));
-    const s = BigInt('0x' + signature.slice(32).toString('hex'));
-    const n = CURVE_ORDER[curve];
-    
-    if (s > n / 2n) {
-        const newS = n - s;
-        return Buffer.concat([
-            signature.slice(0, 32),
-            Buffer.from(newS.toString(16).padStart(64, '0'), 'hex')
-        ]);
-    }
-    return signature;
-}
-
-function rawSign(privateKey, data) {
-    const msgHash = sha256(data);
-    const signature = secp256k1.sign(msgHash, privateKey);
-    return Buffer.concat([
-        Buffer.from(signature.r.toString(16).padStart(64, '0'), 'hex'),
-        Buffer.from(signature.s.toString(16).padStart(64, '0'), 'hex')
-    ]);
 }
 
 async function hashToCid(data, codec = "dag-cbor") {

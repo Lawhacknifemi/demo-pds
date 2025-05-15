@@ -12,6 +12,7 @@ import { writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import base32Encode from 'base32-encode';
+import forge from 'node-forge';
 import config from './config.js';
 
 const require = createRequire(import.meta.url);
@@ -65,6 +66,31 @@ function rawSign(msg, privKey) {
   const r = mitigatedSig.r.toString(16).padStart(64, '0');
   const s = mitigatedSig.s.toString(16).padStart(64, '0');
   return Buffer.from(r + s, 'hex');
+}
+
+// Function to convert raw private key to PEM format
+function privateKeyToPEM(privateKey) {
+    // Create a new key pair using node-forge
+    const keypair = forge.pki.ed25519.generateKeyPair();
+    
+    // Convert the private key to ASN.1 format
+    const asn1 = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes('00')),
+        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
+            forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, forge.asn1.oidToDer('1.2.840.10045.2.1').getBytes()),
+            forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, forge.asn1.oidToDer('1.2.840.10045.3.1.7').getBytes())
+        ]),
+        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, forge.util.hexToBytes('04' + privateKey.toString('hex')))
+    ]);
+
+    // Convert to PEM format
+    const der = forge.asn1.toDer(asn1).getBytes();
+    const base64 = forge.util.encode64(der);
+    const pem = '-----BEGIN PRIVATE KEY-----\n' +
+                base64.match(/.{1,64}/g).join('\n') + '\n' +
+                '-----END PRIVATE KEY-----\n';
+
+    return pem;
 }
 
 async function main() {
@@ -135,9 +161,10 @@ async function main() {
     console.log('Server response:', responseText);
     console.log('DID created successfully:', plcDid);
 
-    // Save the private key
-    const keyPath = join(__dirname, 'private.key');
-    await writeFile(keyPath, privKey.toString('hex'));
+    // Save the private key in PEM format
+    const keyPath = join(__dirname, 'privkey.pem');
+    const pemKey = privateKeyToPEM(privKey);
+    await writeFile(keyPath, pemKey);
     console.log('Private key saved to:', keyPath);
 
   } catch (error) {
