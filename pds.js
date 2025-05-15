@@ -18,12 +18,14 @@ import base64url from 'base64url';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
-// Initialize logging
+// Initialize logging with Python-like format
 const logger = winston.createLogger({
     level: 'debug',
     format: winston.format.combine(
         winston.format.timestamp(),
-        winston.format.json()
+        winston.format.printf(({ level, message, timestamp }) => {
+            return `${timestamp} ${level.toUpperCase()}: ${message}`;
+        })
     ),
     transports: [
         new winston.transports.Console()
@@ -452,6 +454,7 @@ async function repoCreateRecord(req, res) {
         logger.debug('Converted record:', record);
         
         if (record.repo !== config.DID_PLC) {
+            logger.error(`Invalid repo: ${record.repo}, expected: ${config.DID_PLC}`);
             throw new Error("Invalid repo");
         }
 
