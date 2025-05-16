@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import config from './config.js';
 
-const ws = new WebSocket(`ws://${config.PDS_SERVER}:31337/xrpc/com.atproto.sync.subscribeRepos`);
+const ws = new WebSocket(`ws://${config.PDS_SERVER}:10000/xrpc/com.atproto.sync.subscribeRepos`);
 
 ws.on('open', () => {
     console.log('Connected to WebSocket');
