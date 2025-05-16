@@ -340,7 +340,7 @@ async function syncSubscribeRepos(req, res) {
         .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
         .digest('base64'));
     
-    // Create a queue for this client
+    // Create a queue for this client (matching Python's asyncio.Queue behavior)
     const queue = {
         messages: [],
         put: async (msg) => {
@@ -366,6 +366,11 @@ async function syncSubscribeRepos(req, res) {
     try {
         firehoseQueues.add(queue);
         logger.info(`New firehose client connected. Total clients: ${firehoseQueues.size}`);
+        logger.info('Client details:', {
+            remote: req.socket.remoteAddress,
+            forwardedFor: req.headers['x-forwarded-for'],
+            query: req.query
+        });
     } finally {
         firehoseQueuesLock.delete(lockKey);
     }
@@ -601,7 +606,7 @@ async function initServer() {
         const PORT = process.env.PORT || 31337;
         server.listen(PORT, '0.0.0.0', () => {
             logger.info(`PDS server running on port ${PORT}`);
-            logger.info(`WebSocket endpoint available at ws://localhost:${PORT}/xrpc/com.atproto.sync.subscribeRepos`);
+            logger.info(`WebSocket endpoint available at ws://${config.PDS_SERVER}:${PORT}/xrpc/com.atproto.sync.subscribeRepos`);
         });
 
         // Handle process termination
