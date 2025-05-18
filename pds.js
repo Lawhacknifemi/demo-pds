@@ -211,29 +211,18 @@ function authenticated(handler) {
 }
 
 async function firehoseBroadcast(msg) {
-    logger.info('Broadcasting firehose message to all connected clients');
-    logger.debug('Firehose message content:', msg.toString());
-    
     // Use a lock to prevent queue modifications during broadcast
     const lockKey = 'broadcast';
     if (firehoseQueuesLock.get(lockKey)) {
-        logger.warn('Broadcast already in progress, waiting...');
         await new Promise(resolve => setTimeout(resolve, 100));
         return firehoseBroadcast(msg);
     }
     
     firehoseQueuesLock.set(lockKey, true);
     try {
-        let clientCount = 0;
         for (const queue of firehoseQueues) {
-            try {
-                await queue.put(msg);
-                clientCount++;
-            } catch (err) {
-                logger.error('Error broadcasting to firehose queue:', err);
-            }
+            await queue.put(msg);
         }
-        logger.info(`Message broadcast to ${clientCount} clients`);
     } finally {
         firehoseQueuesLock.delete(lockKey);
     }
@@ -603,7 +592,7 @@ async function initServer() {
         app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
 
         // Start server
-        const PORT = process.env.PORT || 31337;
+        const PORT = 31337;  // Fixed port to match Python implementation
         server.listen(PORT, '0.0.0.0', () => {
             logger.info(`PDS server running on port ${PORT}`);
             logger.info(`WebSocket endpoint available at ws://${config.PDS_SERVER}:${PORT}/xrpc/com.atproto.sync.subscribeRepos`);
