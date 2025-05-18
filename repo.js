@@ -318,7 +318,7 @@ class Repo {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid,
+                data: this.tree.cid.toString(),
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
@@ -422,7 +422,7 @@ class Repo {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid,
+                data: this.tree.cid.toString(),
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
