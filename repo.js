@@ -277,6 +277,41 @@ class Repo {
                 );
             });
             
+            if (!prevCommit) {
+                // Create initial commit if it doesn't exist
+                const commit = cleanObject({
+                    version: 3,
+                    data: this.tree.cid.toString(),
+                    rev: tidNow(),
+                    did: this.did,
+                    prev: null
+                });
+                
+                const commitBlob = dagCbor.encode(commit);
+                const commitCid = await hashToCid(commitBlob);
+                commit.sig = await rawSign(this.signingKey, commitBlob);
+
+                await new Promise((resolve, reject) => {
+                    this.con.serialize(() => {
+                        this.con.run(
+                            "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
+                            [Buffer.from(this.tree.cid.bytes), this.tree.value || Buffer.from([])]
+                        );
+                        this.con.run(
+                            "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
+                            [Buffer.from(commitCid.bytes), commitBlob]
+                        );
+                        this.con.run(
+                            "INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)",
+                            [0, Buffer.from(commitCid.bytes)]
+                        );
+                        resolve();
+                    });
+                });
+                
+                prevCommit = { commit_seq: 0, block_value: commitBlob };
+            }
+            
             const prevCommitData = dagCbor.decode(prevCommit.block_value);
             
             // Create new commit
