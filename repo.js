@@ -99,21 +99,50 @@ function enumerateRecordCids(obj) {
 }
 
 class ATNode extends MSTNode {
-    constructor(data) {
-        super(data);
+    /**
+     * @param {Array<ATNode|null>} subtrees
+     * @param {Array<string>} keys
+     * @param {Array<any>} vals
+     */
+    constructor(subtrees, keys, vals) {
+        super(subtrees, keys, vals);
+        // Define _cid as a writable property
+        Object.defineProperty(this, '_cid', {
+            value: null,
+            writable: true,
+            configurable: true
+        });
     }
 
-    keyHeight() {
-        return 1;
+    /**
+     * @param {string} key
+     * @returns {number}
+     */
+    static key_height(key) {
+        return key.length;
     }
 
+    /**
+     * @returns {ATNode}
+     */
+    static empty_root() {
+        return new this([null], [], []);
+    }
+
+    /**
+     * @param {string} key
+     * @returns {string}
+     */
     keyPath() {
         return this.key;
     }
 
+    /**
+     * @yields {any}
+     */
     *enumerateBlocks() {
         yield this.value;
-        for (const child of this.children) {
+        for (const child of this.subtrees) {
             if (child) {
                 yield* child.enumerateBlocks();
             }
@@ -227,10 +256,9 @@ class Repo {
     }
 
     static async create(did, db, signingKey) {
-        const tree = ATNode.emptyRoot();
+        const tree = ATNode.empty_root();
         const emptyRootData = dagCbor.encode({});
         const emptyRootCid = await hashToCid(emptyRootData);
-        tree.cid = emptyRootCid;
         return new Repo(did, db, signingKey, tree);
     }
 
@@ -318,7 +346,7 @@ class Repo {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid.toString(),
+                data: this.tree.cid,
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
@@ -369,13 +397,26 @@ class Repo {
                 this.con.run("INSERT OR REPLACE INTO records (record_key, record_cid) VALUES (?, ?)", 
                     [recordKey, Buffer.from(valueCid.bytes)]);
                 
-                // Insert commit
-                this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
-                    [prevCommit.commit_seq + 1, Buffer.from(commitCid.bytes)]);
-                
-                this.con.run("COMMIT", (err) => {
-                    if (err) reject(err);
-                    else resolve();
+                // Get the next commit sequence number
+                this.con.get("SELECT MAX(commit_seq) as max_seq FROM commits", (err, row) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+                    const nextSeq = (row?.max_seq ?? -1) + 1;
+                    
+                    // Insert commit with the next sequence number
+                    this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
+                        [nextSeq, Buffer.from(commitCid.bytes)], (err) => {
+                            if (err) {
+                                reject(err);
+                                return;
+                            }
+                            this.con.run("COMMIT", (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
                 });
             });
             
@@ -472,13 +513,26 @@ class Repo {
                 // Delete record
                 this.con.run("DELETE FROM records WHERE record_key = ?", [recordKey]);
                 
-                // Insert commit
-                this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
-                    [prevCommit.commit_seq + 1, Buffer.from(commitCid.bytes)]);
-                
-                this.con.run("COMMIT", (err) => {
-                    if (err) reject(err);
-                    else resolve();
+                // Get the next commit sequence number
+                this.con.get("SELECT MAX(commit_seq) as max_seq FROM commits", (err, row) => {
+                    if (err) {
+                        reject(err);
+                        return;
+                    }
+                    const nextSeq = (row?.max_seq ?? -1) + 1;
+                    
+                    // Insert commit with the next sequence number
+                    this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
+                        [nextSeq, Buffer.from(commitCid.bytes)], (err) => {
+                            if (err) {
+                                reject(err);
+                                return;
+                            }
+                            this.con.run("COMMIT", (err) => {
+                                if (err) reject(err);
+                                else resolve();
+                            });
+                        });
                 });
             });
             
