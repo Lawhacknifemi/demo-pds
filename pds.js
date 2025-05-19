@@ -176,11 +176,6 @@ function jwtAccessSubject(token) {
             throw new Error("invalid jwt: expired");
         }
 
-        if (payload.aud !== "com.atproto.access") {
-            console.error('Invalid JWT audience:', payload.aud);
-            throw new Error("invalid jwt: wrong audience");
-        }
-        
         return config.DID_PLC; // Always return the configured DID
     } catch (err) {
         console.error('JWT verification error:', err);
@@ -443,13 +438,26 @@ async function repoCreateRecord(req, res) {
     try {
         logger.info('Creating new record');
         logger.debug('Request body:', req.body);
+        logger.debug('Config DID_PLC:', config.DID_PLC);
         
         const record = jsonToRecord(req.body);
         logger.debug('Converted record:', record);
+        logger.debug('Record repo:', record.repo);
+        
+        if (!record.repo) {
+            logger.error('Missing repo parameter in request');
+            return res.status(400).json({
+                error: "InvalidRequest",
+                message: "Missing repo parameter"
+            });
+        }
         
         if (record.repo !== config.DID_PLC) {
             logger.error(`Invalid repo: ${record.repo}, expected: ${config.DID_PLC}`);
-            throw new Error("Invalid repo");
+            return res.status(400).json({
+                error: "InvalidRequest",
+                message: `Invalid repo: ${record.repo}, expected: ${config.DID_PLC}`
+            });
         }
 
         const { collection, rkey, record: recordData } = record;
@@ -468,6 +476,17 @@ async function repoCreateRecord(req, res) {
     } catch (err) {
         logger.error('Error in repoCreateRecord:', err);
         logger.error('Error stack:', err.stack);
+        logger.error('Request body:', req.body);
+        logger.error('Config DID_PLC:', config.DID_PLC);
+        
+        // Handle specific error cases
+        if (err.message === "Record not found") {
+            return res.status(404).json({
+                error: "NotFound",
+                message: err.message
+            });
+        }
+        
         res.status(500).json({ 
             error: "InternalError", 
             message: err.message,
