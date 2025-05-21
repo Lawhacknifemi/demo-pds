@@ -156,51 +156,60 @@ function rawToDer(rawSignature) {
 
 function jwtAccessSubject(token) {
     try {
-        console.log('Verifying JWT with secret:', config.JWT_ACCESS_SECRET);
         const payload = jwt.verify(token, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
-        console.log('JWT payload:', payload);
         
         if (payload.scope !== "com.atproto.access") {
-            console.error('Invalid JWT scope:', payload.scope);
             throw new Error("invalid jwt scope");
         }
         
         const now = Math.floor(Date.now() / 1000);
         if (!payload.iat || payload.iat > now) {
-            console.error('Invalid JWT iat:', payload.iat, 'now:', now);
             throw new Error("invalid jwt: issued in the future");
         }
         
         if (!payload.exp || payload.exp < now) {
-            console.error('Invalid JWT exp:', payload.exp, 'now:', now);
             throw new Error("invalid jwt: expired");
         }
 
-        return config.DID_PLC; // Always return the configured DID
+        return payload.sub || config.DID_PLC; // Return the subject from payload or fallback to configured DID
     } catch (err) {
-        console.error('JWT verification error:', err);
         throw new Error("invalid jwt");
     }
 }
 
 // Authentication middleware
 function authenticated(handler) {
-    return async (req, res, next) => {
+    return async (req, res) => {
+        const auth = req.headers.authorization;
+        if (!auth) {
+            return res.status(401).json({ 
+                error: "AuthenticationRequired",
+                message: "authentication required (this may be a bug, I'm erring on the side of caution for now)"
+            });
+        }
+
+        const [authtype, value] = auth.split(" ");
+        if (authtype !== "Bearer") {
+            return res.status(401).json({ 
+                error: "InvalidAuthType",
+                message: "invalid auth type"
+            });
+        }
+
         try {
-            const auth = req.headers.authorization;
-            if (!auth) {
-                return res.status(401).json({ error: "authentication required (this may be a bug, I'm erring on the side of caution for now)" });
+            const subject = jwtAccessSubject(value);
+            if (subject !== config.DID_PLC) {
+                return res.status(401).json({ 
+                    error: "InvalidAuthSubject",
+                    message: "invalid auth subject"
+                });
             }
-
-            const [authtype, value] = auth.split(" ");
-            if (authtype !== "Bearer") {
-                return res.status(401).json({ error: "invalid auth type" });
-            }
-
-            jwtAccessSubject(value); // Just verify the JWT is valid
-            return handler(req, res, next);
+            return handler(req, res);
         } catch (err) {
-            return res.status(401).json({ error: err.message });
+            return res.status(401).json({ 
+                error: "InvalidAuth",
+                message: err.message
+            });
         }
     };
 }
@@ -236,8 +245,6 @@ async function serverCreateSession(req, res) {
     try {
         const { identifier, password } = req.body;
         console.log("Creating session for:", identifier);
-        console.log("Full config object:", config);
-        console.log("DID_PLC value:", config.DID_PLC);
 
         if (identifier !== config.HANDLE || password !== config.PASSWORD) {
             return res.status(401).json({ error: "invalid username or password" });
@@ -246,31 +253,22 @@ async function serverCreateSession(req, res) {
         const now = Math.floor(Date.now() / 1000);
         const payload = {
             scope: "com.atproto.access",
+            sub: config.DID_PLC,  // Add DID to payload
             iat: now,
             exp: now + 60 * 60 * 24, // 24 hours
             aud: "com.atproto.access"
         };
-        console.log("JWT payload:", payload);
 
         const accessJwt = jwt.sign(payload, config.JWT_ACCESS_SECRET, { algorithm: 'HS256' });
-        console.log('Generated JWT:', accessJwt);
-
-        // Verify the token immediately after creation
-        try {
-            const verified = jwt.verify(accessJwt, config.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
-            console.log('Successfully verified generated JWT:', verified);
-        } catch (err) {
-            console.error('Failed to verify generated JWT:', err);
-        }
 
         return res.json({
             accessJwt,
             refreshJwt: "todo",
-            handle: config.HANDLE
+            handle: config.HANDLE,
+            did: config.DID_PLC  // Add DID to response
         });
     } catch (err) {
         console.error('Error in serverCreateSession:', err);
-        console.error('Error stack:', err.stack);
         res.status(500).json({ 
             error: "InternalError", 
             message: err.message,
@@ -292,7 +290,7 @@ async function identityResolveHandle(req, res) {
     if (!handle) {
         return res.status(400).json({
             error: "InvalidRequest",
-            message: "Missing handle parameter"
+            message: "missing or invalid handle"
         });
     }
 
@@ -304,10 +302,22 @@ async function identityResolveHandle(req, res) {
         const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.identity.resolveHandle?${new URLSearchParams(req.query)}`, {
             headers: getAppviewAuth()
         });
-        const data = await response.json();
-        res.status(response.status).json(data);
+        
+        if (response.status === 200) {
+            const data = await response.json();
+            return res.json(data);
+        } else {
+            return res.status(404).json({ 
+                error: "HandleNotFound",
+                message: "Handle not found"
+            });
+        }
     } catch (err) {
-        res.status(500).json({ error: "InternalError", message: err.message });
+        console.error('Error resolving handle:', err);
+        return res.status(500).json({ 
+            error: "InternalError", 
+            message: err.message 
+        });
     }
 }
 
@@ -451,25 +461,30 @@ async function repoCreateRecord(req, res) {
                 message: "Missing repo parameter"
             });
         }
-        
+
         if (record.repo !== config.DID_PLC) {
-            logger.error(`Invalid repo: ${record.repo}, expected: ${config.DID_PLC}`);
+            logger.error('Invalid repo:', record.repo);
             return res.status(400).json({
                 error: "InvalidRequest",
-                message: `Invalid repo: ${record.repo}, expected: ${config.DID_PLC}`
+                message: "Invalid repo"
             });
         }
 
-        const { collection, rkey, record: recordData } = record;
-        logger.info(`Creating record in collection: ${collection}, rkey: ${rkey}`);
-        
-        const [uri, cid, firehoseMsg] = await repo.createRecord(collection, recordData, rkey);
-        logger.info(`Record created successfully. URI: ${uri}, CID: ${cid}`);
-        
-        await firehoseBroadcast(firehoseMsg);
-        logger.info('Firehose message broadcast completed');
+        // Ensure the record includes the $type field
+        if (!record.record.$type) {
+            record.record.$type = `app.bsky.feed.${record.collection.split('.').pop()}`;
+        }
 
-        res.json({
+        const [uri, cid, firehoseMsg] = await repo.createRecord(
+            record.collection,
+            record.record,
+            record.rkey
+        );
+
+        // Broadcast the firehose message
+        await firehoseBroadcast(firehoseMsg);
+
+        return res.json({
             uri,
             cid: cid.toString(base32)
         });
@@ -483,14 +498,13 @@ async function repoCreateRecord(req, res) {
         if (err.message === "Record not found") {
             return res.status(404).json({
                 error: "NotFound",
-                message: err.message
+                message: "Record not found"
             });
         }
         
-        res.status(500).json({ 
-            error: "InternalError", 
-            message: err.message,
-            details: err.stack
+        return res.status(500).json({
+            error: "InternalServerError",
+            message: "An unexpected error occurred"
         });
     }
 }
