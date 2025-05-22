@@ -17,6 +17,7 @@ import { sha256 } from '@noble/hashes/sha256';
 import base64url from 'base64url';
 import { WebSocketServer } from 'ws';
 import http from 'http';
+import WebSocket from 'ws';
 
 // Initialize logging with Python-like format
 const logger = winston.createLogger({
@@ -214,6 +215,35 @@ function authenticated(handler) {
     };
 }
 
+// Add function to notify appview server
+async function notifyAppviewServer(msg) {
+    try {
+        const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.sync.notifyOfUpdate`, {
+            method: 'POST',
+            headers: {
+                ...getAppviewAuth(),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                hostname: config.PDS_SERVER,
+                message: msg.toString('base64')
+            })
+        });
+
+        if (!response.ok) {
+            logger.error('Failed to notify appview server:', await response.text());
+            // Retry after a delay
+            setTimeout(() => notifyAppviewServer(msg), 5000);
+        } else {
+            logger.info('Successfully notified appview server of update');
+        }
+    } catch (err) {
+        logger.error('Error notifying appview server:', err);
+        // Retry after a delay
+        setTimeout(() => notifyAppviewServer(msg), 5000);
+    }
+}
+
 async function firehoseBroadcast(msg) {
     // Use a lock to prevent queue modifications during broadcast
     const lockKey = 'broadcast';
@@ -224,9 +254,16 @@ async function firehoseBroadcast(msg) {
     
     firehoseQueuesLock.set(lockKey, true);
     try {
+        // Broadcast to all connected clients (including appview server)
         for (const queue of firehoseQueues) {
             await queue.put(msg);
         }
+        
+        // Log the broadcast for debugging
+        logger.info('Firehose message broadcast:', {
+            msgType: msg[0] === 0x82 ? 'commit' : 'unknown',
+            msgLength: msg.length
+        });
     } finally {
         firehoseQueuesLock.delete(lockKey);
     }
@@ -585,6 +622,62 @@ async function bskyActorGetProfile(req, res) {
     }
 }
 
+async function syncNotifyOfUpdate(req, res) {
+    try {
+        const { hostname, message } = req.body;
+        if (!hostname || !message) {
+            return res.status(400).json({
+                error: "InvalidRequest",
+                message: "Missing required fields"
+            });
+        }
+
+        // Decode the message
+        const msgBuffer = Buffer.from(message, 'base64');
+        
+        // Broadcast the message to our firehose clients
+        await firehoseBroadcast(msgBuffer);
+        
+        res.status(200).end();
+    } catch (err) {
+        logger.error('Error in syncNotifyOfUpdate:', err);
+        res.status(500).json({
+            error: "InternalError",
+            message: err.message
+        });
+    }
+}
+
+// Add WebSocket connection to appview server
+async function connectToAppviewServer() {
+    try {
+        const ws = new WebSocket(`wss://${config.APPVIEW_SERVER}/xrpc/com.atproto.sync.subscribeRepos`);
+        
+        ws.on('open', () => {
+            logger.info('Connected to appview server WebSocket');
+        });
+        
+        ws.on('error', (err) => {
+            logger.error('WebSocket error with appview server:', err);
+            // Attempt to reconnect after delay
+            setTimeout(connectToAppviewServer, 5000);
+        });
+        
+        ws.on('close', () => {
+            logger.info('WebSocket connection to appview server closed, attempting to reconnect...');
+            // Attempt to reconnect after delay
+            setTimeout(connectToAppviewServer, 5000);
+        });
+        
+        return ws;
+    } catch (err) {
+        logger.error('Failed to connect to appview server:', err);
+        // Attempt to reconnect after delay
+        setTimeout(connectToAppviewServer, 5000);
+    }
+}
+
+// Modify initServer to establish appview connection
 async function initServer() {
     try {
         // Initialize repository
@@ -598,6 +691,9 @@ async function initServer() {
         // Initialize WebSocket server
         const wss = new WebSocketServer({ server });
         logger.info('WebSocket server initialized');
+        
+        // Connect to appview server
+        await connectToAppviewServer();
         
         app.use(cors({
             origin: '*',
@@ -623,6 +719,7 @@ async function initServer() {
         app.post('/xrpc/com.atproto.repo.uploadBlob', authenticated(repoUploadBlob));
         app.get('/xrpc/app.bsky.feed.getAuthorFeed', authenticated(bskyFeedGetAuthorFeed));
         app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
+        app.post('/xrpc/com.atproto.sync.notifyOfUpdate', authenticated(syncNotifyOfUpdate));
 
         // Start server
         const PORT = 31337;  // Fixed port to match Python implementation
@@ -657,7 +754,7 @@ async function initServer() {
 
         return { app, server };
     } catch (err) {
-        logger.error('Failed to initialize server:', err);
+        logger.error('Error initializing server:', err);
         process.exit(1);
     }
 }
