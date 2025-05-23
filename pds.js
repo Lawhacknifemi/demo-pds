@@ -371,7 +371,7 @@ async function syncSubscribeRepos(req, res) {
         .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
         .digest('base64'));
     
-    // Create a queue for this client (matching Python's asyncio.Queue behavior)
+    // Create a queue for this client
     const queue = {
         messages: [],
         put: async (msg) => {
@@ -412,15 +412,19 @@ async function syncSubscribeRepos(req, res) {
         logger.info('WebSocket connection upgraded successfully');
         
         // Handle WebSocket connection
-        ws.on('message', async (data) => {
+        const sendMessages = async () => {
             try {
-                const msg = await queue.get();
-                ws.send(msg, { binary: true });
+                while (true) {
+                    const msg = await queue.get();
+                    ws.send(msg, { binary: true });
+                }
             } catch (err) {
                 logger.error('Error sending message:', err);
                 ws.close();
             }
-        });
+        };
+        
+        sendMessages();
         
         ws.on('close', () => {
             logger.info('Firehose client disconnected');
@@ -464,17 +468,67 @@ async function syncGetRepo(req, res) {
             });
         }
 
-        res.json({
-            did: config.DID_PLC,
-            rev: "0",
-            data: {
-                posts: [],
-                profiles: [],
-                lists: []
-            }
-        });
+        // Get the repository checkout as a CAR file
+        const carData = await repo.getCheckout();
+        
+        // Set the proper content type for CAR files
+        res.setHeader('Content-Type', 'application/vnd.ipld.car');
+        
+        // Send the CAR file data
+        res.send(carData);
     } catch (err) {
-        res.status(500).json({ error: "InternalError", message: err.message });
+        logger.error('Error in syncGetRepo:', err);
+        res.status(500).json({ 
+            error: "InternalError", 
+            message: err.message 
+        });
+    }
+}
+
+async function syncGetCheckout(req, res) {
+    try {
+        const { did, commit } = req.query;
+        if (!did) {
+            return res.status(400).json({
+                error: "InvalidRequest",
+                message: "Missing did parameter"
+            });
+        }
+
+        if (did !== config.DID_PLC) {
+            return res.status(404).json({
+                error: "NotFound",
+                message: "Repo not found"
+            });
+        }
+
+        // Decode commit CID if provided
+        let commitCid = null;
+        if (commit) {
+            try {
+                commitCid = CID.decode(commit);
+            } catch (err) {
+                return res.status(400).json({
+                    error: "InvalidRequest",
+                    message: "Invalid commit CID format"
+                });
+            }
+        }
+
+        // Get the repository checkout as a CAR file
+        const carData = await repo.getCheckout(commitCid);
+        
+        // Set the proper content type for CAR files
+        res.setHeader('Content-Type', 'application/vnd.ipld.car');
+        
+        // Send the CAR file data
+        res.send(carData);
+    } catch (err) {
+        logger.error('Error in syncGetCheckout:', err);
+        res.status(500).json({ 
+            error: "InternalError", 
+            message: err.message 
+        });
     }
 }
 
@@ -648,36 +702,7 @@ async function syncNotifyOfUpdate(req, res) {
     }
 }
 
-// Add WebSocket connection to appview server
-async function connectToAppviewServer() {
-    try {
-        const ws = new WebSocket(`wss://${config.APPVIEW_SERVER}/xrpc/com.atproto.sync.subscribeRepos`);
-        
-        ws.on('open', () => {
-            logger.info('Connected to appview server WebSocket');
-        });
-        
-        ws.on('error', (err) => {
-            logger.error('WebSocket error with appview server:', err);
-            // Attempt to reconnect after delay
-            setTimeout(connectToAppviewServer, 5000);
-        });
-        
-        ws.on('close', () => {
-            logger.info('WebSocket connection to appview server closed, attempting to reconnect...');
-            // Attempt to reconnect after delay
-            setTimeout(connectToAppviewServer, 5000);
-        });
-        
-        return ws;
-    } catch (err) {
-        logger.error('Failed to connect to appview server:', err);
-        // Attempt to reconnect after delay
-        setTimeout(connectToAppviewServer, 5000);
-    }
-}
-
-// Modify initServer to establish appview connection
+// Modify initServer to remove appview connection
 async function initServer() {
     try {
         // Initialize repository
@@ -691,9 +716,6 @@ async function initServer() {
         // Initialize WebSocket server
         const wss = new WebSocketServer({ server });
         logger.info('WebSocket server initialized');
-        
-        // Connect to appview server
-        await connectToAppviewServer();
         
         app.use(cors({
             origin: '*',
@@ -713,6 +735,7 @@ async function initServer() {
         app.get('/xrpc/com.atproto.identity.resolveHandle', identityResolveHandle);
         app.get('/xrpc/com.atproto.sync.subscribeRepos', syncSubscribeRepos);
         app.get('/xrpc/com.atproto.sync.getRepo', syncGetRepo);
+        app.get('/xrpc/com.atproto.sync.getCheckout', syncGetCheckout);
         app.post('/xrpc/com.atproto.repo.createRecord', authenticated(repoCreateRecord));
         app.post('/xrpc/com.atproto.repo.deleteRecord', authenticated(repoDeleteRecord));
         app.get('/xrpc/com.atproto.repo.getRecord', authenticated(repoGetRecord));
