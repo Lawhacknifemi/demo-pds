@@ -245,27 +245,19 @@ async function notifyAppviewServer(msg) {
 }
 
 async function firehoseBroadcast(msg) {
-    // Use a lock to prevent queue modifications during broadcast
-    const lockKey = 'broadcast';
-    if (firehoseQueuesLock.get(lockKey)) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        return firehoseBroadcast(msg);
-    }
+    logger.info('Broadcasting firehose message');
     
-    firehoseQueuesLock.set(lockKey, true);
-    try {
-        // Broadcast to all connected clients (including appview server)
-        for (const queue of firehoseQueues) {
-            await queue.put(msg);
+    // Broadcast to all connected clients
+    for (const queue of firehoseQueues) {
+        try {
+            for (const ws of queue) {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(msg, { binary: true });
+                }
+            }
+        } catch (err) {
+            logger.error('Error broadcasting to client:', err);
         }
-        
-        // Log the broadcast for debugging
-        logger.info('Firehose message broadcast:', {
-            msgType: msg[0] === 0x82 ? 'commit' : 'unknown',
-            msgLength: msg.length
-        });
-    } finally {
-        firehoseQueuesLock.delete(lockKey);
     }
 }
 
@@ -360,8 +352,6 @@ async function identityResolveHandle(req, res) {
 
 async function syncSubscribeRepos(req, res) {
     logger.info('New WebSocket subscription request received');
-    logger.debug('Request headers:', req.headers);
-    logger.debug('Request query:', req.query);
     
     // Set proper headers for WebSocket upgrade
     res.setHeader('Upgrade', 'websocket');
@@ -371,40 +361,16 @@ async function syncSubscribeRepos(req, res) {
         .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
         .digest('base64'));
     
-    // Create a queue for this client
-    const queue = {
-        messages: [],
-        put: async (msg) => {
-            queue.messages.push(msg);
-        },
-        get: async () => {
-            if (queue.messages.length === 0) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-                return queue.get();
-            }
-            return queue.messages.shift();
-        }
-    };
+    // Create a simple queue for this client
+    const queue = new Set();
+    firehoseQueues.add(queue);
     
-    // Add to firehose queues with lock
-    const lockKey = 'queue_add';
-    if (firehoseQueuesLock.get(lockKey)) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        return syncSubscribeRepos(req, res);
-    }
-    
-    firehoseQueuesLock.set(lockKey, true);
-    try {
-        firehoseQueues.add(queue);
-        logger.info(`New firehose client connected. Total clients: ${firehoseQueues.size}`);
-        logger.info('Client details:', {
-            remote: req.socket.remoteAddress,
-            forwardedFor: req.headers['x-forwarded-for'],
-            query: req.query
-        });
-    } finally {
-        firehoseQueuesLock.delete(lockKey);
-    }
+    logger.info(`New firehose client connected. Total clients: ${firehoseQueues.size}`);
+    logger.info('Client details:', {
+        remote: req.socket.remoteAddress,
+        forwardedFor: req.headers['x-forwarded-for'],
+        query: req.query
+    });
     
     // Handle the upgrade
     const server = req.socket.server;
@@ -412,36 +378,13 @@ async function syncSubscribeRepos(req, res) {
         logger.info('WebSocket connection upgraded successfully');
         
         // Handle WebSocket connection
-        const sendMessages = async () => {
-            try {
-                while (true) {
-                    const msg = await queue.get();
-                    ws.send(msg, { binary: true });
-                }
-            } catch (err) {
-                logger.error('Error sending message:', err);
-                ws.close();
-            }
-        };
-        
-        sendMessages();
+        ws.on('message', (msg) => {
+            // Handle incoming messages if needed
+        });
         
         ws.on('close', () => {
             logger.info('Firehose client disconnected');
-            // Remove from firehose queues with lock
-            const lockKey = 'queue_remove';
-            if (firehoseQueuesLock.get(lockKey)) {
-                setTimeout(() => {
-                    firehoseQueues.delete(queue);
-                }, 100);
-            } else {
-                firehoseQueuesLock.set(lockKey, true);
-                try {
-                    firehoseQueues.delete(queue);
-                } finally {
-                    firehoseQueuesLock.delete(lockKey);
-                }
-            }
+            firehoseQueues.delete(queue);
         });
         
         ws.on('error', (err) => {
