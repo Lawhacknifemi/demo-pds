@@ -17,44 +17,38 @@ function varintEncode(n) {
     return new Uint8Array(result);
 }
 
-// Serialize function (matches Python's serialise)
+// Serialize function (matches Python's serialise exactly)
 function serialise(roots, blocks) {
-    // Create and encode header
+    // Create header with raw CID bytes, matching Python's format
     const header = {
         version: 1,
-        roots: roots.map(root => root.toString())
+        roots: roots.map(cid => {
+            // Convert CID to raw bytes with the same format as Python
+            const cidBytes = cid instanceof CID ? cid.bytes : cid;
+            // Add the d8 2a prefix that Python uses
+            return new Uint8Array([0xd8, 0x2a, 0x58, 0x25, ...cidBytes]);
+        })
     };
     const headerBytes = dagCbor.encode(header);
     
-    // Calculate total size needed
-    const headerSize = varintEncode(headerBytes.length).length + headerBytes.length;
-    const blocksSize = blocks.reduce((acc, [cid, data]) => {
-        const blockSize = varintEncode(cid.length + data.length).length + cid.length + data.length;
-        return acc + blockSize;
-    }, 0);
+    // Start with header length and header
+    let result = Buffer.concat([
+        varintEncode(headerBytes.length),
+        headerBytes
+    ]);
     
-    // Create result buffer
-    const result = new Uint8Array(headerSize + blocksSize);
-    let offset = 0;
-    
-    // Write header length and header
-    const headerLengthBytes = varintEncode(headerBytes.length);
-    result.set(headerLengthBytes, offset);
-    offset += headerLengthBytes.length;
-    result.set(headerBytes, offset);
-    offset += headerBytes.length;
-    
-    // Write each block
+    // Add each block
     for (const [block_cid, block_data] of blocks) {
-        const block_length = block_cid.length + block_data.length;
-        const lengthBytes = varintEncode(block_length);
+        // Ensure block_cid is raw bytes
+        const cidBytes = block_cid instanceof CID ? block_cid.bytes : block_cid;
+        const blockLength = cidBytes.length + block_data.length;
         
-        result.set(lengthBytes, offset);
-        offset += lengthBytes.length;
-        result.set(block_cid, offset);
-        offset += block_cid.length;
-        result.set(block_data, offset);
-        offset += block_data.length;
+        result = Buffer.concat([
+            result,
+            varintEncode(blockLength),
+            cidBytes,
+            block_data
+        ]);
     }
     
     return result;

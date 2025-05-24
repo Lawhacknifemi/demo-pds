@@ -693,47 +693,17 @@ class Repo {
             });
 
             // Convert blocks to the format needed for CAR serialization
-            const carBlocks = blocks.map(row => ({
-                cid: CID.decode(row.block_cid),
-                bytes: row.block_value
-            }));
+            const carBlocks = blocks.map(row => [
+                Buffer.from(row.block_cid), // Use raw bytes for CID
+                row.block_value
+            ]);
 
-            // Serialize to CAR format
-            return this.serializeCar([commit], carBlocks);
+            // Serialize to CAR format using carfile.js
+            return serialise([commit], carBlocks);
         } catch (err) {
             logger.error('Error in getCheckout:', err);
             throw err;
         }
-    }
-
-    serializeCar(roots, blocks) {
-        // CAR format header
-        const header = {
-            version: 1,
-            roots: roots.map(cid => cid.bytes)
-        };
-
-        // Create CAR file content
-        const headerBytes = dagCbor.encode(header);
-        const headerLength = Buffer.alloc(4);
-        headerLength.writeUInt32BE(headerBytes.length);
-
-        // Combine header and blocks
-        const carContent = Buffer.concat([
-            Buffer.from([0x0a]), // CAR version 1 marker
-            headerLength,
-            headerBytes,
-            ...blocks.map(block => {
-                const blockLength = Buffer.alloc(4);
-                blockLength.writeUInt32BE(block.bytes.length);
-                return Buffer.concat([
-                    blockLength,
-                    block.bytes
-                ]);
-            })
-        ]);
-
-        return carContent;
     }
 }
 
