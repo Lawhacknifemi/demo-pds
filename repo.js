@@ -311,8 +311,8 @@ class Repo {
                     version: 3,
                     data: this.tree.cid.toString(),
                     rev: tidNow(),
-                    did: this.did,
-                    prev: null
+                    prev: null,
+                    did: this.did
                 });
                 
                 const commitBlob = dagCbor.encode(commit);
@@ -370,7 +370,7 @@ class Repo {
                         path: recordKey,
                         action: "create"
                     }],
-                    seq: Math.floor(Date.now() * 1000), // Microseconds timestamp
+                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
                     rev: newCommitRev,
                     since: prevCommitData.rev,
                     prev: null,
@@ -487,7 +487,7 @@ class Repo {
                         path: recordKey,
                         action: "delete"
                     }],
-                    seq: Math.floor(Date.now() * 1000), // Microseconds timestamp
+                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
                     rev: newCommitRev,
                     since: prevCommitData.rev,
                     prev: null,
