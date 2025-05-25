@@ -218,6 +218,11 @@ function authenticated(handler) {
 // Add function to notify appview server
 async function notifyAppviewServer(msg) {
     try {
+        logger.debug('Notifying appview server of update:', {
+            hostname: config.PDS_SERVER,
+            messageLength: msg.length
+        });
+        
         const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.sync.notifyOfUpdate`, {
             method: 'POST',
             headers: {
@@ -231,11 +236,17 @@ async function notifyAppviewServer(msg) {
         });
 
         if (!response.ok) {
-            logger.error('Failed to notify appview server:', await response.text());
+            const errorText = await response.text();
+            logger.error('Failed to notify appview server:', {
+                status: response.status,
+                statusText: response.statusText,
+                error: errorText
+            });
             // Retry after a delay
             setTimeout(() => notifyAppviewServer(msg), 5000);
         } else {
-            logger.info('Successfully notified appview server of update');
+            const responseData = await response.json();
+            logger.info('Successfully notified appview server of update:', responseData);
         }
     } catch (err) {
         logger.error('Error notifying appview server:', err);

@@ -19,14 +19,12 @@ function varintEncode(n) {
 
 // Serialize function (matches Python's serialise exactly)
 function serialise(roots, blocks) {
-    // Create header with raw CID bytes, matching Python's format
+    // Create header with raw CID bytes
     const header = {
         version: 1,
         roots: roots.map(cid => {
-            // Convert CID to raw bytes with the same format as Python
-            const cidBytes = cid instanceof CID ? cid.bytes : cid;
-            // Add the d8 2a prefix that Python uses
-            return new Uint8Array([0xd8, 0x2a, 0x58, 0x25, ...cidBytes]);
+            // Convert CID to raw bytes
+            return cid instanceof CID ? cid.bytes : cid;
         })
     };
     const headerBytes = dagCbor.encode(header);

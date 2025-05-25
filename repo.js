@@ -346,9 +346,9 @@ class Repo {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid,
+                data: this.tree.cid.toString(),
                 rev: newCommitRev,
-                prev: null,
+                prev: prevCommitData.cid,
                 did: this.did
             });
             
@@ -366,19 +366,19 @@ class Repo {
                 dagCbor.encode({ t: "#commit", op: 1 }),
                 dagCbor.encode({
                     ops: [{
-                        cid: valueCid,
+                        cid: valueCid.toString(),
                         path: recordKey,
                         action: "create"
                     }],
-                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
+                    seq: Math.floor(Date.now() * 1000000),
                     rev: newCommitRev,
                     since: prevCommitData.rev,
-                    prev: null,
+                    prev: prevCommitData.cid.toString(),
                     repo: this.did,
-                    time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
-                    blobs: Array.from(referencedBlobs),
-                    blocks: await serialise([commitCid], dbBlockInserts), // Use the same serialization as Python
-                    commit: commitCid,
+                    time: new Date().toISOString().replace('.000Z', 'Z'),
+                    blobs: Array.from(referencedBlobs).map(cid => cid.toString()),
+                    blocks: await serialise([commitCid], dbBlockInserts),
+                    commit: commitCid.toString(),
                     rebase: false,
                     tooBig: false
                 })
