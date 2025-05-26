@@ -52,13 +52,13 @@ function tupleInsertAt(arr, index, value) {
 function tupleRemoveAt(arr, index) {
     const result = [...arr.slice(0, index), ...arr.slice(index + 1)];
     return Object.freeze(result);
-}
-
-/**
- * Base MSTNode class - represents nodes in the Merkle Search Tree
+  }
+  
+  /**
+   * Base MSTNode class - represents nodes in the Merkle Search Tree
  * @abstract
- */
-export class MSTNode {
+   */
+  export class MSTNode {
     /**
      * @param {Array<MSTNode|null>} subtrees
      * @param {Array<string>} keys
@@ -112,64 +112,64 @@ export class MSTNode {
      * @returns {MSTNode}
      */
     static _fromOptional(value) {
-        if (value === null) {
+      if (value === null) {
             return this.emptyRoot();
-        }
-        return value;
+      }
+      return value;
     }
-
+  
     /**
      * @returns {MSTNode|null}
      */
     _toOptional() {
-        if (this.subtrees.length === 1 && this.subtrees[0] === null && this.keys.length === 0) {
-            return null;
-        }
-        return this;
+      if (this.subtrees.length === 1 && this.subtrees[0] === null && this.keys.length === 0) {
+        return null;
+      }
+      return this;
     }
-
+  
     /**
      * @param {Set<MSTNode>} created
      * @returns {MSTNode}
      */
     _squashTop(created) {
-        if (this.keys.length) {
-            return this;
-        }
-        if (this.subtrees[0] === null) {
-            return this;
-        }
-        created.delete(this);
+      if (this.keys.length) {
+        return this;
+      }
+      if (this.subtrees[0] === null) {
+        return this;
+      }
+      created.delete(this);
         return this.subtrees[0]._squashTop(created);
     }
-
+  
     /**
      * @returns {number}
      */
     height() {
-        if (this.keys.length > 0) {
-            return this.constructor.key_height(this.keys[0]);
-        }
-        
-        if (this.subtrees[0] === null) {
-            return 0;
-        }
-        
-        return this.subtrees[0].height() + 1;
+      if (this.keys.length > 0) {
+        return this.constructor.key_height(this.keys[0]);
+      }
+      
+      if (this.subtrees[0] === null) {
+        return 0;
+      }
+      
+      return this.subtrees[0].height() + 1;
     }
-
+  
     /**
      * @param {string} key
      * @returns {number}
      */
     _gteIndex(key) {
-        let i = 0;
-        while (i < this.keys.length && key > this.keys[i]) {
-            i++;
-        }
-        return i;
+      let i = 0;
+      while (i < this.keys.length && key > this.keys[i]) {
+        i++;
+      }
+      return i;
     }
-
+  
     /**
      * @param {string} key_min
      * @param {string} key_max
@@ -179,30 +179,30 @@ export class MSTNode {
     *get_range(key_min, key_max, reverse = false) {
         const start = this._gteIndex(key_min);
         const end = this._gteIndex(key_max);
-        
-        if (reverse) {
-            if (this.subtrees[end] !== null) {
-                yield* this.subtrees[end].get_range(key_min, key_max, reverse);
-            }
-            for (let i = end - 1; i >= start; i--) {
-                yield [this.keys[i], this.vals[i]];
-                if (this.subtrees[i] !== null) {
-                    yield* this.subtrees[i].get_range(key_min, key_max, reverse);
-                }
-            }
-        } else {
-            for (let i = start; i < end; i++) {
-                if (this.subtrees[i] !== null) {
-                    yield* this.subtrees[i].get_range(key_min, key_max, reverse);
-                }
-                yield [this.keys[i], this.vals[i]];
-            }
-            if (this.subtrees[end] !== null) {
-                yield* this.subtrees[end].get_range(key_min, key_max, reverse);
-            }
+      
+      if (reverse) {
+        if (this.subtrees[end] !== null) {
+          yield* this.subtrees[end].get_range(key_min, key_max, reverse);
         }
+        for (let i = end - 1; i >= start; i--) {
+          yield [this.keys[i], this.vals[i]];
+          if (this.subtrees[i] !== null) {
+            yield* this.subtrees[i].get_range(key_min, key_max, reverse);
+          }
+        }
+      } else {
+        for (let i = start; i < end; i++) {
+          if (this.subtrees[i] !== null) {
+            yield* this.subtrees[i].get_range(key_min, key_max, reverse);
+          }
+          yield [this.keys[i], this.vals[i]];
+        }
+        if (this.subtrees[end] !== null) {
+          yield* this.subtrees[end].get_range(key_min, key_max, reverse);
+        }
+      }
     }
-
+  
     /**
      * @param {string} key
      * @param {any} val
@@ -213,12 +213,12 @@ export class MSTNode {
         console.log('Putting key:', key, 'value:', val, 'in node with keys:', this.keys);
         if (this.subtrees.length === 1 && this.subtrees[0] === null) { // special case for empty tree
             console.log('Empty tree case, putting here');
-            return this._put_here(key, val, created);
-        }
+        return this._put_here(key, val, created);
+      }
         console.log('Recursive put, key height:', this.constructor.key_height(key), 'tree height:', this.height());
-        return this._put_recursive(key, val, this.constructor.key_height(key), this.height(), created);
+      return this._put_recursive(key, val, this.constructor.key_height(key), this.height(), created);
     }
-
+  
     _put_recursive(key, val, key_height, tree_height, created) {
         console.log('_put_recursive:', {key, key_height, tree_height});
         if (typeof key !== 'string') {
@@ -240,9 +240,9 @@ export class MSTNode {
         
         if (this.subtrees[0] === null) {
             // Leaf node, insert here
-            return this._put_here(key, val, created);
-        }
-        
+      return this._put_here(key, val, created);
+    }
+  
         // Internal node, recurse
         const newSubtrees = [...this.subtrees];
         newSubtrees[i] = this.subtrees[i].put(key, val, created);
@@ -261,13 +261,13 @@ export class MSTNode {
      */
     _put_here(key, val, created = new Set()) {
         console.log('_put_here:', {key, val});
-        const cls = this.constructor;
-        
+      const cls = this.constructor;
+      
         const i = this._gteIndex(key);
-        if (i < this.keys.length && this.keys[i] === key) {
-            if (this.vals[i] === val) {
-                return this;
-            }
+      if (i < this.keys.length && this.keys[i] === key) {
+        if (this.vals[i] === val) {
+          return this;
+        }
             const newNode = new cls(
                 this.subtrees,
                 this.keys,
@@ -298,10 +298,10 @@ export class MSTNode {
      * @returns {[MSTNode|null, MSTNode|null]}
      */
     static _splitOnKey(tree, key, created = new Set()) {
-        if (tree === null) {
-            return [null, null];
-        }
-        
+      if (tree === null) {
+        return [null, null];
+      }
+      
         const i = tree._gteIndex(key);
         const [lsub, rsub] = this._splitOnKey(tree.subtrees[i], key, created);
         
@@ -316,17 +316,17 @@ export class MSTNode {
             tree.keys.slice(i),
             tree.vals.slice(i)
         )._toOptional();
-        
-        if (left !== null) {
-            created.add(left);
-        }
-        if (right !== null) {
-            created.add(right);
-        }
-        
-        return [left, right];
+      
+      if (left !== null) {
+        created.add(left);
+      }
+      if (right !== null) {
+        created.add(right);
+      }
+      
+      return [left, right];
     }
-
+  
     /**
      * @param {string} key
      * @param {Set<MSTNode>} created
@@ -414,17 +414,17 @@ export class MSTNode {
         this.outdatedPointer = true;
         this._cid = null;
     }
-}
-
-/**
- * MST wrapper class for mutable interface
- */
+  }
+  
+  /**
+   * MST wrapper class for mutable interface
+   */
 export class MST {
     /**
      * @param {MSTNode} root
      */
     constructor(root) {
-        this.root = root;
+      this.root = root;
     }
   
     /**
@@ -439,7 +439,7 @@ export class MST {
      * @returns {number}
      */
     height() {
-        return this.root.height();
+      return this.root.height();
     }
   
     /**
@@ -448,8 +448,8 @@ export class MST {
      * @returns {MST}
      */
     set(key, val) {
-        this.root = this.root.put(key, val, new Set());
-        return this;
+      this.root = this.root.put(key, val, new Set());
+      return this;
     }
   
     /**
@@ -458,12 +458,12 @@ export class MST {
      * @throws {Error} If key not found
      */
     delete(key) {
-        const prev_root = this.root;
-        this.root = this.root.delete(key, new Set());
-        if (this.root === prev_root) {
-            throw new Error(`Key '${key}' not found`);
-        }
-        return this;
+      const prev_root = this.root;
+      this.root = this.root.delete(key, new Set());
+      if (this.root === prev_root) {
+        throw new Error(`Key '${key}' not found`);
+      }
+      return this;
     }
   
     /**
@@ -472,7 +472,7 @@ export class MST {
      * @returns {any}
      */
     get(key, sentinel = null) {
-        return this.root.get(key, sentinel);
+      return this.root.get(key, sentinel);
     }
   
     /**
@@ -480,7 +480,7 @@ export class MST {
      * @returns {boolean}
      */
     has(key) {
-        return this.get(key) !== null;
+      return this.get(key) !== null;
     }
   
     /**
@@ -490,19 +490,19 @@ export class MST {
      * @yields {[string, any]}
      */
     *get_range(key_min, key_max, reverse = false) {
-        yield* this.root.get_range(key_min, key_max, reverse);
+      yield* this.root.get_range(key_min, key_max, reverse);
     }
-}
-
-/**
- * Example implementation
- */
+  }
+  
+  /**
+   * Example implementation
+   */
 export class StrlenNode extends MSTNode {
     /**
      * @param {string} key
      * @returns {number}
      */
     static key_height(key) {
-        return key.length;
+      return key.length;
     }
-}
+  }

@@ -143,23 +143,18 @@ async function main() {
 
     // Send the operation to the PLC server
     console.log('Sending operation to PLC server:', JSON.stringify(signedOp, null, 2));
-    const response = await fetch(`${PLC_SERVER}/${plcDid}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(signedOp)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Server response:', errorText);
-      throw new Error(`Failed to create DID: ${response.status} ${response.statusText}`);
+    try {
+        const response = await axios.post(`${PLC_SERVER}/${plcDid}`, signedOp, {
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+        console.log('Server response:', response.data);
+        console.log('DID created successfully:', plcDid);
+    } catch (error) {
+        console.error('Server response:', error.response?.data || error.message);
+        throw new Error(`Failed to create DID: ${error.message}`);
     }
-
-    const responseText = await response.text();
-    console.log('Server response:', responseText);
-    console.log('DID created successfully:', plcDid);
 
     // Save the private key in PEM format
     const keyPath = join(__dirname, 'privkey.pem');
