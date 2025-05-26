@@ -403,6 +403,26 @@ wss.on('connection', (ws) => {
     });
 });
 
+// Create HTTP server
+const server = http.createServer(app);
+
+// Handle WebSocket upgrade
+server.on('upgrade', (request, socket, head) => {
+    logger.info('Received upgrade request');
+    const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+    
+    if (pathname === '/xrpc/com.atproto.sync.subscribeRepos') {
+        logger.info('Upgrading to WebSocket for subscribeRepos');
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            logger.info('WebSocket upgrade completed');
+            wss.emit('connection', ws, request);
+        });
+    } else {
+        logger.warn('Invalid WebSocket path:', pathname);
+        socket.destroy();
+    }
+});
+
 async function syncSubscribeRepos(req, res) {
     logger.info('Received subscribeRepos request');
     logger.debug('Request headers:', req.headers);
@@ -415,11 +435,8 @@ async function syncSubscribeRepos(req, res) {
         });
     }
 
-    logger.info('Upgrading connection to WebSocket');
-    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
-        logger.info('WebSocket upgrade completed');
-        wss.emit('connection', ws, req);
-    });
+    // The upgrade will be handled by the server's 'upgrade' event
+    logger.info('Upgrade request will be handled by server');
 }
 
 async function syncGetRepo(req, res) {
@@ -699,10 +716,9 @@ async function initServer() {
         app.post('/xrpc/com.atproto.sync.notifyOfUpdate', authenticated(syncNotifyOfUpdate));
 
         // Start server
-        const PORT = 31337;  // Fixed port to match Python implementation
-        server.listen(PORT, '0.0.0.0', () => {
-            logger.info(`PDS server running on port ${PORT}`);
-            logger.info(`WebSocket endpoint available at ws://${config.PDS_SERVER}:${PORT}/xrpc/com.atproto.sync.subscribeRepos`);
+        const PORT = process.env.PORT || 3000;
+        server.listen(PORT, () => {
+            logger.info(`Server is running on port ${PORT}`);
         });
 
         // Handle process termination
