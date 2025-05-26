@@ -364,12 +364,12 @@ class Repo {
                         path: recordKey,
                         action: "create"
                     }],
-                    seq: Math.floor(Date.now() * 1000000),
+                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
                     rev: newCommitRev,
                     since: prevCommitData?.rev || tidNow(),
                     prev: prevCommitData?.cid?.toString() || null,
                     repo: this.did,
-                    time: new Date().toISOString().replace('.000Z', 'Z'),
+                    time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
                     blobs: Array.from(referencedBlobs).map(cid => cid.toString()),
                     blocks: await serialise([commitCid], dbBlockInserts),
                     commit: commitCid.toString(),
@@ -488,8 +488,8 @@ class Repo {
                     repo: this.did,
                     time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
                     blobs: [],
-                    blocks: await serialise([commitCid], dbBlockInserts), // Use the same serialization as Python
-                    commit: commitCid,
+                    blocks: await serialise([commitCid], dbBlockInserts),
+                    commit: commitCid.toString(),
                     rebase: false,
                     tooBig: false
                 })
