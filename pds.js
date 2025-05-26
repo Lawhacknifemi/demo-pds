@@ -258,15 +258,17 @@ async function notifyAppviewServer(msg) {
 
 async function firehoseBroadcast(msg) {
     logger.info('Broadcasting firehose message to', firehoseQueues.size, 'clients');
+    logger.debug('Message content:', msg.toString('hex')); // Log message content in hex
     try {
         await firehoseQueuesLock.acquire('firehose', async () => {
             for (const queue of firehoseQueues) {
                 try {
                     if (queue.readyState === WebSocket.OPEN) {
+                        logger.debug('Sending message to WebSocket client');
                         await queue.send(msg);
-                        logger.debug('Message sent to firehose queue');
+                        logger.info('Message sent to firehose queue successfully');
                     } else {
-                        logger.warn('WebSocket not in OPEN state, removing from queues');
+                        logger.warn('WebSocket not in OPEN state, removing from queues. State:', queue.readyState);
                         firehoseQueues.delete(queue);
                     }
                 } catch (error) {
@@ -370,6 +372,9 @@ async function identityResolveHandle(req, res) {
 }
 
 async function syncSubscribeRepos(req, res) {
+    logger.info('Received subscribeRepos request');
+    logger.debug('Request headers:', req.headers);
+    
     if (req.headers.upgrade !== 'websocket') {
         logger.warn('Non-WebSocket request to subscribeRepos');
         return res.status(400).json({
@@ -382,8 +387,8 @@ async function syncSubscribeRepos(req, res) {
 
     const ws = new WebSocket.Server({ noServer: true });
     ws.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
-        firehoseQueues.add(ws);
         logger.info('WebSocket connection established');
+        firehoseQueues.add(ws);
         
         ws.on('close', () => {
             logger.info('WebSocket connection closed');
@@ -398,6 +403,15 @@ async function syncSubscribeRepos(req, res) {
         ws.on('message', (message) => {
             logger.debug('Received message from client:', message);
         });
+
+        // Send a test message immediately after connection
+        try {
+            const testMsg = Buffer.from('Test connection message');
+            ws.send(testMsg);
+            logger.info('Test message sent to new client');
+        } catch (error) {
+            logger.error('Error sending test message:', error);
+        }
     });
 }
 
