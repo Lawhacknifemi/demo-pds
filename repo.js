@@ -11,6 +11,8 @@ import { randomInt } from 'crypto';
 import { createHash } from 'crypto';
 import pkg from 'base64url';
 import winston from 'winston';
+import config from './config.js';
+import crypto from 'crypto';
 const { base64url } = pkg;
 
 // Initialize logging with Python-like format
@@ -264,103 +266,95 @@ class Repo {
 
     async createRecord(collection, record, rkey = null) {
         try {
-            logger.debug(`Creating record in collection: ${collection}, rkey: ${rkey}`);
-            
+            logger.info('Creating new record');
+            logger.debug('Request body:', { repo: this.did, collection, record });
+            logger.debug('Config DID_PLC:', config.DID_PLC);
+
+            // Generate rkey if not provided
             if (!rkey) {
-                rkey = tidNow();
+                rkey = base32Encode(Buffer.from(crypto.getRandomValues(new Uint8Array(10))));
             }
-            
+
             const recordKey = `${collection}/${rkey}`;
-            
-            // Clean the record before processing
-            const cleanRecord = cleanObject(record);
-            logger.debug('Cleaned record:', cleanRecord);
-            
+            logger.debug('Creating record in collection:', collection, 'rkey:', rkey);
+
+            // Clean the record
+            const cleanedRecord = cleanObject(record);
+            logger.debug('Cleaned record:', cleanedRecord);
+
             // Handle blob references
             const referencedBlobs = new Set();
-            for (const cid of enumerateRecordCids(cleanRecord)) {
-                referencedBlobs.add(cid);
-                await this.increfBlob(cid);
+            for (const blob of enumerateRecordCids(cleanedRecord)) {
+                await this.increfBlob(blob);
+                referencedBlobs.add(blob);
             }
-            
-            const value = dagCbor.encode(cleanRecord);
-            const valueCid = await hashToCid(value);
-            const dbBlockInserts = [[Buffer.from(valueCid.bytes), value]];
-            
-            // Update MST
+
+            // Create the record value
+            const valueBlob = dagCbor.encode(cleanedRecord);
+            const valueCid = await hashToCid(valueBlob);
+            const dbBlockInserts = [[Buffer.from(valueCid.bytes), valueBlob]];
+
+            // Update the MST
             const newBlocks = new Set();
-            this.tree = this.tree.put(recordKey, valueCid, newBlocks);
+            this.tree = this.tree.put(recordKey, valueCid.toString(), newBlocks);
             for (const block of newBlocks) {
                 dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
             }
-            
+
             // Get previous commit
             const prevCommit = await new Promise((resolve, reject) => {
                 this.con.get(
                     "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
                     (err, row) => {
                         if (err) reject(err);
-                        resolve(row);
+                        if (!row) {
+                            // If no previous commit exists, create initial commit
+                            const initialCommit = cleanObject({
+                                version: 3,
+                                data: this.tree.cid.toString(),
+                                rev: tidNow(),
+                                prev: null,
+                                did: this.did
+                            });
+                            resolve({ block_value: dagCbor.encode(initialCommit) });
+                        } else {
+                            resolve(row);
+                        }
                     }
                 );
             });
-            
-            if (!prevCommit) {
-                // Create initial commit if it doesn't exist
-                const commit = cleanObject({
-                    version: 3,
-                    data: this.tree.cid.toString(),
-                    rev: tidNow(),
-                    prev: null,
-                    did: this.did
-                });
-                
-                const commitBlob = dagCbor.encode(commit);
-                const commitCid = await hashToCid(commitBlob);
-                commit.sig = await rawSign(this.signingKey, commitBlob);
 
-                await new Promise((resolve, reject) => {
-                    this.con.serialize(() => {
-                        this.con.run(
-                            "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
-                            [Buffer.from(this.tree.cid.bytes), this.tree.value || Buffer.from([])]
-                        );
-                        this.con.run(
-                            "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
-                            [Buffer.from(commitCid.bytes), commitBlob]
-                        );
-                        this.con.run(
-                            "INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)",
-                            [0, Buffer.from(commitCid.bytes)]
-                        );
-                        resolve();
-                    });
-                });
-                
-                prevCommit = { commit_seq: 0, block_value: commitBlob };
+            let prevCommitData;
+            try {
+                prevCommitData = dagCbor.decode(prevCommit.block_value);
+            } catch (err) {
+                logger.error('Error decoding previous commit:', err);
+                // Create a default previous commit data if decoding fails
+                prevCommitData = {
+                    cid: null,
+                    rev: tidNow()
+                };
             }
-            
-            const prevCommitData = dagCbor.decode(prevCommit.block_value);
-            
+
             // Create new commit
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
                 data: this.tree.cid.toString(),
                 rev: newCommitRev,
-                prev: prevCommitData.cid,
+                prev: prevCommitData?.cid?.toString() || null,
                 did: this.did
             });
-            
+
             // Sign the commit
             const commitBytes = dagCbor.encode(commit);
             const commitSig = await rawSign(this.signingKey, commitBytes);
             commit.sig = commitSig;
-            
+
             const commitBlob = dagCbor.encode(commit);
             const commitCid = await hashToCid(commitBlob);
             dbBlockInserts.push([Buffer.from(commitCid.bytes), commitBlob]);
-            
+
             // Create firehose message
             const firehoseBlob = Buffer.concat([
                 dagCbor.encode({ t: "#commit", op: 1 }),
@@ -372,8 +366,8 @@ class Repo {
                     }],
                     seq: Math.floor(Date.now() * 1000000),
                     rev: newCommitRev,
-                    since: prevCommitData.rev,
-                    prev: prevCommitData.cid.toString(),
+                    since: prevCommitData?.rev || tidNow(),
+                    prev: prevCommitData?.cid?.toString() || null,
                     repo: this.did,
                     time: new Date().toISOString().replace('.000Z', 'Z'),
                     blobs: Array.from(referencedBlobs).map(cid => cid.toString()),
@@ -383,7 +377,7 @@ class Repo {
                     tooBig: false
                 })
             ]);
-            
+
             // Insert blocks into database
             await new Promise((resolve, reject) => {
                 this.con.run("BEGIN TRANSACTION");
@@ -392,11 +386,11 @@ class Repo {
                     stmt.run([cid, value]);
                 }
                 stmt.finalize();
-                
+
                 // Update records
                 this.con.run("INSERT OR REPLACE INTO records (record_key, record_cid) VALUES (?, ?)", 
                     [recordKey, Buffer.from(valueCid.bytes)]);
-                
+
                 // Get the next commit sequence number
                 this.con.get("SELECT MAX(commit_seq) as max_seq FROM commits", (err, row) => {
                     if (err) {
@@ -404,7 +398,7 @@ class Repo {
                         return;
                     }
                     const nextSeq = (row?.max_seq ?? -1) + 1;
-                    
+
                     // Insert commit with the next sequence number
                     this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
                         [nextSeq, Buffer.from(commitCid.bytes)], (err) => {
@@ -419,7 +413,7 @@ class Repo {
                         });
                 });
             });
-            
+
             logger.info(`Record created successfully. URI: at://${this.did}/${recordKey}, CID: ${valueCid}`);
             return [`at://${this.did}/${recordKey}`, valueCid, firehoseBlob];
         } catch (err) {
