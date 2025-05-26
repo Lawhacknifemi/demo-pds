@@ -371,6 +371,38 @@ async function identityResolveHandle(req, res) {
     }
 }
 
+// Initialize WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+
+// Handle WebSocket connections
+wss.on('connection', (ws) => {
+    logger.info('New WebSocket connection established');
+    firehoseQueues.add(ws);
+    
+    // Send test message
+    try {
+        const testMsg = Buffer.from('Test connection message');
+        ws.send(testMsg);
+        logger.info('Test message sent to new client');
+    } catch (error) {
+        logger.error('Error sending test message:', error);
+    }
+
+    ws.on('close', () => {
+        logger.info('WebSocket connection closed');
+        firehoseQueues.delete(ws);
+    });
+
+    ws.on('error', (error) => {
+        logger.error('WebSocket error:', error);
+        firehoseQueues.delete(ws);
+    });
+
+    ws.on('message', (message) => {
+        logger.debug('Received message from client:', message);
+    });
+});
+
 async function syncSubscribeRepos(req, res) {
     logger.info('Received subscribeRepos request');
     logger.debug('Request headers:', req.headers);
@@ -383,35 +415,10 @@ async function syncSubscribeRepos(req, res) {
         });
     }
 
-    logger.info('New firehose client connecting:', req.remote, req.headers['x-forwarded-for'], req.query);
-
-    const ws = new WebSocket.Server({ noServer: true });
-    ws.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
-        logger.info('WebSocket connection established');
-        firehoseQueues.add(ws);
-        
-        ws.on('close', () => {
-            logger.info('WebSocket connection closed');
-            firehoseQueues.delete(ws);
-        });
-
-        ws.on('error', (error) => {
-            logger.error('WebSocket error:', error);
-            firehoseQueues.delete(ws);
-        });
-
-        ws.on('message', (message) => {
-            logger.debug('Received message from client:', message);
-        });
-
-        // Send a test message immediately after connection
-        try {
-            const testMsg = Buffer.from('Test connection message');
-            ws.send(testMsg);
-            logger.info('Test message sent to new client');
-        } catch (error) {
-            logger.error('Error sending test message:', error);
-        }
+    logger.info('Upgrading connection to WebSocket');
+    wss.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+        logger.info('WebSocket upgrade completed');
+        wss.emit('connection', ws, req);
     });
 }
 
