@@ -85,7 +85,9 @@ export class MSTNode {
         this.subtrees = Object.freeze([...subtrees]);
         this.keys = Object.freeze([...keys]);
         this.vals = Object.freeze([...vals]);
+        this._serialised = null;
         this._cid = null;
+        this.outdatedPointer = false;
     }
 
     /**
@@ -207,7 +209,18 @@ export class MSTNode {
      * @param {Set<MSTNode>} created
      * @returns {MSTNode}
      */
-    put(key, val, created = new Set()) {
+    put(key, val, created) {
+        console.log('Putting key:', key, 'value:', val, 'in node with keys:', this.keys);
+        if (this.subtrees.length === 1 && this.subtrees[0] === null) { // special case for empty tree
+            console.log('Empty tree case, putting here');
+            return this._put_here(key, val, created);
+        }
+        console.log('Recursive put, key height:', this.constructor.key_height(key), 'tree height:', this.height());
+        return this._put_recursive(key, val, this.constructor.key_height(key), this.height(), created);
+    }
+
+    _put_recursive(key, val, key_height, tree_height, created) {
+        console.log('_put_recursive:', {key, key_height, tree_height});
         if (typeof key !== 'string') {
             throw new Error('Key must be a string');
         }
@@ -222,18 +235,22 @@ export class MSTNode {
         
         if (i < this.keys.length && this.keys[i] === key) {
             // Key exists, replace value
-            return this._putHere(key, val, created);
+            return this._put_here(key, val, created);
         }
         
         if (this.subtrees[0] === null) {
             // Leaf node, insert here
-            return this._putHere(key, val, created);
+            return this._put_here(key, val, created);
         }
         
         // Internal node, recurse
         const newSubtrees = [...this.subtrees];
         newSubtrees[i] = this.subtrees[i].put(key, val, created);
-        return new MSTNode(newSubtrees, this.keys, this.vals);
+        
+        // Create new node with updated subtrees
+        const newNode = new this.constructor(newSubtrees, this.keys, this.vals);
+        created.add(newNode);
+        return newNode;
     }
 
     /**
@@ -242,7 +259,8 @@ export class MSTNode {
      * @param {Set<MSTNode>} created
      * @returns {MSTNode}
      */
-    _putHere(key, val, created = new Set()) {
+    _put_here(key, val, created = new Set()) {
+        console.log('_put_here:', {key, val});
         const cls = this.constructor;
         
         const i = this._gteIndex(key);
@@ -259,18 +277,15 @@ export class MSTNode {
             return newNode;
         }
         
-        const [left, right] = cls._splitOnKey(this.subtrees[i], key, created);
-        const newSubtrees = [
-            ...this.subtrees.slice(0, i),
-            left,
-            right,
-            ...this.subtrees.slice(i + 1)
-        ];
+        // Create new subtrees array with the new key-value pair
+        const newSubtrees = [...this.subtrees.slice(0, i), null, ...this.subtrees.slice(i)];
+        const newKeys = tupleInsertAt(this.keys, i, key);
+        const newVals = tupleInsertAt(this.vals, i, val);
         
         const newNode = new cls(
             newSubtrees,
-            tupleInsertAt(this.keys, i, key),
-            tupleInsertAt(this.vals, i, val)
+            newKeys,
+            newVals
         );
         created.add(newNode);
         return newNode;
@@ -350,36 +365,54 @@ export class MSTNode {
      * @returns {CID}
      */
     get cid() {
-        if (!this._cid) {
-            const bytes = this.serialised;
-            const hash = sha256.digest(bytes);
+        if (this._cid === null || this.outdatedPointer) {
+            console.log('Computing CID for node with keys:', this.keys);
+            const serialised = this.serialised;
+            const hash = sha256.digest(serialised);
             this._cid = CID.create(1, 0x71, hash);
+            this.outdatedPointer = false;
+            console.log('Computed CID:', this._cid.toString());
         }
         return this._cid;
     }
 
     get serialised() {
-        const entries = [];
-        let prevKey = Buffer.from('');
-        
-        for (let i = 0; i < this.keys.length; i++) {
-            const keyBytes = Buffer.from(this.keys[i]);
-            const sharedPrefixLen = getSharedPrefixLength(prevKey, keyBytes);
+        if (this._serialised === null) {
+            console.log('Computing serialized data for node with keys:', this.keys);
+            // Compress key prefixes like in the TypeScript implementation
+            const entries = [];
+            let prevKey = '';
             
-            entries.push({
-                k: keyBytes.slice(sharedPrefixLen),
-                p: sharedPrefixLen,
-                t: this.subtrees[i + 1] === null ? null : this.subtrees[i + 1].cid,
-                v: this.vals[i]
+            for (let i = 0; i < this.keys.length; i++) {
+                const key = this.keys[i];
+                const sharedPrefix = getSharedPrefixLength(
+                    Buffer.from(prevKey),
+                    Buffer.from(key)
+                );
+                
+                entries.push({
+                    p: sharedPrefix,
+                    k: key.slice(sharedPrefix),
+                    v: this.vals[i],
+                    t: this.subtrees[i + 1] === null ? null : this.subtrees[i + 1].cid.toString()
+                });
+                
+                prevKey = key;
+            }
+
+            this._serialised = dagCbor.encode({
+                l: this.subtrees[0] === null ? null : this.subtrees[0].cid.toString(),
+                e: entries
             });
-            
-            prevKey = keyBytes;
+            console.log('Computed serialized data length:', this._serialised.length);
         }
-        
-        return dagCbor.encode({
-            e: entries,
-            l: this.subtrees[0] === null ? null : this.subtrees[0].cid
-        });
+        return this._serialised;
+    }
+
+    // Helper method to mark the node as needing CID recalculation
+    markOutdated() {
+        this.outdatedPointer = true;
+        this._cid = null;
     }
 }
 
