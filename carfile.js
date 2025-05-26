@@ -77,3 +77,46 @@ async function main() {
 
 // Run the example
 main().catch(console.error);
+
+// Global variables
+const firehoseQueues = new Set();
+const firehoseQueuesLock = new Map();
+
+async function firehoseBroadcast(msg) {
+    logger.info('Broadcasting firehose message:', msg);
+    const lock = new AsyncLock();
+    await lock.acquire('firehose', async () => {
+        for (const queue of firehoseQueues) {
+            try {
+                await queue.send(msg);
+                logger.info('Message sent to firehose queue');
+            } catch (error) {
+                logger.error('Error broadcasting to firehose queue:', error);
+                firehoseQueues.delete(queue);
+            }
+        }
+    });
+}
+
+async function syncSubscribeRepos(req, res) {
+    if (req.headers.upgrade !== 'websocket') {
+        return res.status(400).json({
+            error: "InvalidRequest",
+            message: "Expected WebSocket connection"
+        });
+    }
+
+    const ws = new WebSocket.Server({ noServer: true });
+    ws.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+        firehoseQueues.add(ws);
+        
+        ws.on('close', () => {
+            firehoseQueues.delete(ws);
+        });
+
+        ws.on('error', (error) => {
+            logger.error('WebSocket error:', error);
+            firehoseQueues.delete(ws);
+        });
+    });
+}

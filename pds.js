@@ -18,6 +18,7 @@ import base64url from 'base64url';
 import { WebSocketServer } from 'ws';
 import http from 'http';
 import WebSocket from 'ws';
+import AsyncLock from 'async-lock';
 
 // Initialize logging with Python-like format
 const logger = winston.createLogger({
@@ -53,7 +54,7 @@ try {
 
 // Initialize firehose queues
 const firehoseQueues = new Set();
-const firehoseQueuesLock = new Map();
+const firehoseQueuesLock = new AsyncLock();
 
 // Cache for appview auth
 const appviewAuthCache = new Map();
@@ -256,19 +257,26 @@ async function notifyAppviewServer(msg) {
 }
 
 async function firehoseBroadcast(msg) {
-    logger.info('Broadcasting firehose message');
-    
-    // Broadcast to all connected clients
-    for (const queue of firehoseQueues) {
-        try {
-            for (const ws of queue) {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(msg, { binary: true });
+    logger.info('Broadcasting firehose message to', firehoseQueues.size, 'clients');
+    try {
+        await firehoseQueuesLock.acquire('firehose', async () => {
+            for (const queue of firehoseQueues) {
+                try {
+                    if (queue.readyState === WebSocket.OPEN) {
+                        await queue.send(msg);
+                        logger.debug('Message sent to firehose queue');
+                    } else {
+                        logger.warn('WebSocket not in OPEN state, removing from queues');
+                        firehoseQueues.delete(queue);
+                    }
+                } catch (error) {
+                    logger.error('Error broadcasting to firehose queue:', error);
+                    firehoseQueues.delete(queue);
                 }
             }
-        } catch (err) {
-            logger.error('Error broadcasting to client:', err);
-        }
+        });
+    } catch (error) {
+        logger.error('Error acquiring firehose lock:', error);
     }
 }
 
@@ -362,45 +370,33 @@ async function identityResolveHandle(req, res) {
 }
 
 async function syncSubscribeRepos(req, res) {
-    logger.info('New WebSocket subscription request received');
-    
-    // Set proper headers for WebSocket upgrade
-    res.setHeader('Upgrade', 'websocket');
-    res.setHeader('Connection', 'Upgrade');
-    res.setHeader('Sec-WebSocket-Accept', crypto
-        .createHash('sha1')
-        .update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-        .digest('base64'));
-    
-    // Create a simple queue for this client
-    const queue = new Set();
-    firehoseQueues.add(queue);
-    
-    logger.info(`New firehose client connected. Total clients: ${firehoseQueues.size}`);
-    logger.info('Client details:', {
-        remote: req.socket.remoteAddress,
-        forwardedFor: req.headers['x-forwarded-for'],
-        query: req.query
-    });
-    
-    // Handle the upgrade
-    const server = req.socket.server;
-    server.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
-        logger.info('WebSocket connection upgraded successfully');
-        
-        // Handle WebSocket connection
-        ws.on('message', (msg) => {
-            // Handle incoming messages if needed
+    if (req.headers.upgrade !== 'websocket') {
+        logger.warn('Non-WebSocket request to subscribeRepos');
+        return res.status(400).json({
+            error: "InvalidRequest",
+            message: "Expected WebSocket connection"
         });
+    }
+
+    logger.info('New firehose client connecting:', req.remote, req.headers['x-forwarded-for'], req.query);
+
+    const ws = new WebSocket.Server({ noServer: true });
+    ws.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
+        firehoseQueues.add(ws);
+        logger.info('WebSocket connection established');
         
         ws.on('close', () => {
-            logger.info('Firehose client disconnected');
-            firehoseQueues.delete(queue);
+            logger.info('WebSocket connection closed');
+            firehoseQueues.delete(ws);
         });
-        
-        ws.on('error', (err) => {
-            logger.error('WebSocket error:', err);
-            firehoseQueues.delete(queue);
+
+        ws.on('error', (error) => {
+            logger.error('WebSocket error:', error);
+            firehoseQueues.delete(ws);
+        });
+
+        ws.on('message', (message) => {
+            logger.debug('Received message from client:', message);
         });
     });
 }
@@ -491,42 +487,37 @@ let repo;
 
 async function repoCreateRecord(req, res) {
     try {
-        logger.info('Creating new record');
-        logger.debug('Request body:', req.body);
-        logger.debug('Config DID_PLC:', config.DID_PLC);
-        
         const record = jsonToRecord(req.body);
-        logger.debug('Converted record:', record);
-        logger.debug('Record repo:', record.repo);
         
-        if (!record.repo) {
-            logger.error('Missing repo parameter in request');
+        // Validate required fields
+        if (!record.repo || !record.collection || !record.record) {
             return res.status(400).json({
                 error: "InvalidRequest",
-                message: "Missing repo parameter"
+                message: "Missing required fields"
             });
         }
 
+        // Validate repo matches our DID
         if (record.repo !== config.DID_PLC) {
-            logger.error('Invalid repo:', record.repo);
             return res.status(400).json({
                 error: "InvalidRequest",
                 message: "Invalid repo"
             });
         }
 
-        // Ensure the record includes the $type field
+        // Ensure record has $type field
         if (!record.record.$type) {
             record.record.$type = `app.bsky.feed.${record.collection.split('.').pop()}`;
         }
 
+        // Create record and broadcast
         const [uri, cid, firehoseMsg] = await repo.createRecord(
             record.collection,
             record.record,
             record.rkey
         );
 
-        // Broadcast the firehose message
+        // Broadcast to firehose
         await firehoseBroadcast(firehoseMsg);
 
         return res.json({
@@ -535,21 +526,9 @@ async function repoCreateRecord(req, res) {
         });
     } catch (err) {
         logger.error('Error in repoCreateRecord:', err);
-        logger.error('Error stack:', err.stack);
-        logger.error('Request body:', req.body);
-        logger.error('Config DID_PLC:', config.DID_PLC);
-        
-        // Handle specific error cases
-        if (err.message === "Record not found") {
-            return res.status(404).json({
-                error: "NotFound",
-                message: "Record not found"
-            });
-        }
-        
-        return res.status(500).json({
-            error: "InternalServerError",
-            message: "An unexpected error occurred"
+        res.status(500).json({ 
+            error: "InternalError", 
+            message: err.message 
         });
     }
 }
