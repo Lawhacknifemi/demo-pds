@@ -25,8 +25,7 @@ RUN useradd -m appuser
 RUN chown -R appuser:appuser /app && \
     chmod -R 755 /app && \
     chmod 644 /app/*.js && \
-    chmod 644 /app/*.json && \
-    chmod 644 /app/*.pem
+    chmod 644 /app/*.json
 
 USER appuser
 
@@ -41,6 +40,8 @@ if [ ! -f "privkey.pem" ] || ! grep -q "DID_PLC" config.js; then\n\
         echo "Updating config.js with DID: $DID"\n\
         # Update config.js with the new DID\n\
         sed -i "s/DID_PLC = .*/DID_PLC = \"$DID\";/" config.js\n\
+        # Set permissions for newly created files\n\
+        chmod 644 privkey.pem\n\
         # Run request_crawl.js after successful identity creation\n\
         node request_crawl.js\n\
     else\n\
