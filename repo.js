@@ -356,6 +356,7 @@ class Repo {
             dbBlockInserts.push([Buffer.from(commitCid.bytes), commitBlob]);
 
             // Create firehose message
+            logger.info('Creating firehose message for record creation');
             const firehoseBlob = Buffer.concat([
                 dagCbor.encode({ t: "#commit", op: 1 }),
                 dagCbor.encode({
@@ -377,6 +378,7 @@ class Repo {
                     tooBig: false
                 })
             ]);
+            logger.debug('Firehose message created:', firehoseBlob.toString('hex'));
 
             // Insert blocks into database
             await new Promise((resolve, reject) => {
