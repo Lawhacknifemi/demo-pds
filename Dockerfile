@@ -20,7 +20,14 @@ COPY . .
 
 # Create a non-root user
 RUN useradd -m appuser
-RUN chown -R appuser:appuser /app
+
+# Set proper permissions
+RUN chown -R appuser:appuser /app && \
+    chmod -R 755 /app && \
+    chmod 644 /app/*.js && \
+    chmod 644 /app/*.json && \
+    chmod 644 /app/*.pem
+
 USER appuser
 
 # Create a startup script with improved error handling

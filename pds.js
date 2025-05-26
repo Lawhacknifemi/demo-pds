@@ -403,26 +403,6 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Create HTTP server
-const server = http.createServer(app);
-
-// Handle WebSocket upgrade
-server.on('upgrade', (request, socket, head) => {
-    logger.info('Received upgrade request');
-    const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
-    
-    if (pathname === '/xrpc/com.atproto.sync.subscribeRepos') {
-        logger.info('Upgrading to WebSocket for subscribeRepos');
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            logger.info('WebSocket upgrade completed');
-            wss.emit('connection', ws, request);
-        });
-    } else {
-        logger.warn('Invalid WebSocket path:', pathname);
-        socket.destroy();
-    }
-});
-
 async function syncSubscribeRepos(req, res) {
     logger.info('Received subscribeRepos request');
     logger.debug('Request headers:', req.headers);
@@ -682,12 +662,8 @@ async function initServer() {
 
         // Initialize Express app
         const app = express();
-        const server = http.createServer(app);
         
-        // Initialize WebSocket server
-        const wss = new WebSocketServer({ server });
-        logger.info('WebSocket server initialized');
-        
+        // Configure middleware
         app.use(cors({
             origin: '*',
             methods: '*',
@@ -714,6 +690,26 @@ async function initServer() {
         app.get('/xrpc/app.bsky.feed.getAuthorFeed', authenticated(bskyFeedGetAuthorFeed));
         app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
         app.post('/xrpc/com.atproto.sync.notifyOfUpdate', authenticated(syncNotifyOfUpdate));
+
+        // Create HTTP server
+        const server = http.createServer(app);
+        
+        // Handle WebSocket upgrade
+        server.on('upgrade', (request, socket, head) => {
+            logger.info('Received upgrade request');
+            const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+            
+            if (pathname === '/xrpc/com.atproto.sync.subscribeRepos') {
+                logger.info('Upgrading to WebSocket for subscribeRepos');
+                wss.handleUpgrade(request, socket, head, (ws) => {
+                    logger.info('WebSocket upgrade completed');
+                    wss.emit('connection', ws, request);
+                });
+            } else {
+                logger.warn('Invalid WebSocket path:', pathname);
+                socket.destroy();
+            }
+        });
 
         // Start server
         const PORT = process.env.PORT || 3000;
