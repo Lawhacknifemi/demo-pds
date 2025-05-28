@@ -514,26 +514,30 @@ class Repo {
             dbBlockInserts.push([Buffer.from(commitCid.bytes), commitBlob]);
             
             // Create firehose message
-            const firehoseBlob = dagCbor.encode({
-                t: "#commit",
-                op: 1,
-                ops: [{
-                    cid: null,
-                    path: recordKey,
-                    action: "delete"
-                }],
-                seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
-                rev: newCommitRev,
-                since: prevCommitData.rev,
-                prev: prevCommitData.prev || null,
-                repo: this.did,
-                time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
-                blobs: [],
-                blocks: await serialise([commitCid], dbBlockInserts),
-                commit: commitCid.toString(),
-                rebase: false,
-                tooBig: false
-            });
+            const firehoseBlob = Buffer.concat([
+                dagCbor.encode({
+                    t: "#commit",
+                    op: 1
+                }),
+                dagCbor.encode({
+                    ops: [{
+                        cid: null,
+                        path: recordKey,
+                        action: "delete"
+                    }],
+                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
+                    rev: newCommitRev,
+                    since: prevCommitData.rev,
+                    prev: prevCommitData.prev || null,
+                    repo: this.did,
+                    time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
+                    blobs: [],
+                    blocks: await serialise([commitCid], dbBlockInserts),
+                    commit: commitCid.toString(),
+                    rebase: false,
+                    tooBig: false
+                })
+            ]);
             
             // Insert blocks into database
             await new Promise((resolve, reject) => {
