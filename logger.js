@@ -1,17 +1,26 @@
 import winston from 'winston';
 
-// Initialize logging with Python-like format
 const logger = winston.createLogger({
-    level: 'debug',
+    level: process.env.LOG_LEVEL || 'info',
     format: winston.format.combine(
         winston.format.timestamp(),
-        winston.format.printf(({ level, message, timestamp }) => {
-            return `${timestamp} ${level.toUpperCase()}: ${message}`;
-        })
+        winston.format.json()
     ),
     transports: [
-        new winston.transports.Console()
+        new winston.transports.Console({
+            format: winston.format.combine(
+                winston.format.colorize(),
+                winston.format.simple()
+            )
+        }),
+        new winston.transports.File({
+            filename: 'error.log',
+            level: 'error'
+        }),
+        new winston.transports.File({
+            filename: 'combined.log'
+        })
     ]
 });
 
-export default logger; 
+export { logger }; 

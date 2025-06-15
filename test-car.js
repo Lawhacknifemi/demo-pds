@@ -38,9 +38,23 @@ async function testCarSerialization() {
         console.log('\nHeader:', header);
         console.log('Version:', header.version);
         console.log('Roots:', header.roots.map(r => {
-            // Skip the d8 2a 58 25 prefix when displaying the CID
-            const cidBytes = r.slice(4);
-            return CID.decode(cidBytes).toString();
+            try {
+                if (r instanceof CID) {
+                    return r.toString();
+                } else if (r instanceof Uint8Array) {
+                    try {
+                        // Try decoding as-is
+                        return CID.decode(r).toString();
+                    } catch (e) {
+                        // If that fails, try slicing off the first 4 bytes
+                        return CID.decode(r.slice(4)).toString();
+                    }
+                } else {
+                    return r.toString();
+                }
+            } catch (e) {
+                return `Error decoding CID: ${e}`;
+            }
         }));
         
         // Verify block

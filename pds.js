@@ -19,6 +19,10 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import WebSocket from 'ws';
 import AsyncLock from 'async-lock';
+import { createServer } from 'http';
+
+// Global variables
+let repo;
 
 // Initialize logging with Python-like format
 const logger = winston.createLogger({
@@ -59,6 +63,7 @@ const firehoseQueuesLock = new AsyncLock();
 // Cache for appview auth
 const appviewAuthCache = new Map();
 const APPVIEW_AUTH_TTL = 60 * 60 * 1000; // 1 hour in milliseconds
+let retryCount = 0; // Add retry count for exponential backoff
 
 function getAppviewAuth() {
     if (!privkeyObj) {
@@ -243,29 +248,34 @@ async function notifyAppviewServer(msg) {
                 statusText: response.statusText,
                 error: errorText
             });
-            // Retry after a delay
-            setTimeout(() => notifyAppviewServer(msg), 5000);
+            // Retry after a delay with exponential backoff
+            const retryDelay = Math.min(5000 * Math.pow(2, retryCount), 300000); // Max 5 minutes
+            setTimeout(() => notifyAppviewServer(msg), retryDelay);
         } else {
             const responseData = await response.json();
             logger.info('Successfully notified appview server of update:', responseData);
         }
     } catch (err) {
         logger.error('Error notifying appview server:', err);
-        // Retry after a delay
-        setTimeout(() => notifyAppviewServer(msg), 5000);
+        // Retry after a delay with exponential backoff
+        const retryDelay = Math.min(5000 * Math.pow(2, retryCount), 300000); // Max 5 minutes
+        setTimeout(() => notifyAppviewServer(msg), retryDelay);
     }
 }
 
 async function firehoseBroadcast(msg) {
     logger.info('Broadcasting firehose message to', firehoseQueues.size, 'clients');
-    logger.debug('Message content:', msg.toString('hex')); // Log message content in hex
+    
     try {
         await firehoseQueuesLock.acquire('firehose', async () => {
+            // Ensure message is a Buffer
+            const messageBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
+            
             for (const queue of firehoseQueues) {
                 try {
                     if (queue.readyState === WebSocket.OPEN) {
                         logger.debug('Sending message to WebSocket client');
-                        await queue.send(msg);
+                        queue.send(messageBuffer, { binary: true });
                         logger.info('Message sent to firehose queue successfully');
                     } else {
                         logger.warn('WebSocket not in OPEN state, removing from queues. State:', queue.readyState);
@@ -371,46 +381,14 @@ async function identityResolveHandle(req, res) {
     }
 }
 
-// Initialize WebSocket server
-const wss = new WebSocketServer({ noServer: true });
-
-// Handle WebSocket connections
-wss.on('connection', (ws) => {
-    logger.info('New WebSocket connection established');
-    firehoseQueues.add(ws);
-    
-    // Send test message
-    try {
-        const testMsg = Buffer.from('Test connection message');
-        ws.send(testMsg);
-        logger.info('Test message sent to new client');
-    } catch (error) {
-        logger.error('Error sending test message:', error);
-    }
-
-    ws.on('close', () => {
-        logger.info('WebSocket connection closed');
-        firehoseQueues.delete(ws);
-    });
-
-    ws.on('error', (error) => {
-        logger.error('WebSocket error:', error);
-        firehoseQueues.delete(ws);
-    });
-
-    ws.on('message', (message) => {
-        logger.debug('Received message from client:', message);
-    });
-});
-
 async function syncSubscribeRepos(req, res) {
     logger.info('Received subscribeRepos request');
     logger.debug('Request headers:', req.headers);
     
     if (req.headers.upgrade !== 'websocket') {
         logger.warn('Non-WebSocket request to subscribeRepos');
-        return res.status(400).json({
-            error: "InvalidRequest",
+        return res.status(426).json({
+            error: "UpgradeRequired",
             message: "Expected WebSocket connection"
         });
     }
@@ -500,47 +478,22 @@ async function syncGetCheckout(req, res) {
     }
 }
 
-// Global variables
-let repo;
-
 async function repoCreateRecord(req, res) {
     try {
         const record = jsonToRecord(req.body);
-        
-        // Validate required fields
-        if (!record.repo || !record.collection || !record.record) {
-            return res.status(400).json({
-                error: "InvalidRequest",
-                message: "Missing required fields"
-            });
-        }
-
-        // Validate repo matches our DID
         if (record.repo !== config.DID_PLC) {
-            return res.status(400).json({
-                error: "InvalidRequest",
-                message: "Invalid repo"
-            });
+            throw new Error("Invalid repo");
         }
 
-        // Ensure record has $type field
-        if (!record.record.$type) {
-            record.record.$type = `app.bsky.feed.${record.collection.split('.').pop()}`;
-        }
-
-        // Create record and broadcast
-        const [uri, cid, firehoseMsg] = await repo.createRecord(
-            record.collection,
-            record.record,
-            record.rkey
-        );
+        const { collection, repo: repoDid } = record;
+        const result = await repo.createRecord(collection, repoDid, record.record);
 
         // Broadcast to firehose
-        await firehoseBroadcast(firehoseMsg);
+        await firehoseBroadcast(result.firehoseMsg);
 
         return res.json({
-            uri,
-            cid: cid.toString(base32)
+            uri: result.uri,
+            cid: result.cid
         });
     } catch (err) {
         logger.error('Error in repoCreateRecord:', err);
@@ -653,11 +606,43 @@ async function syncNotifyOfUpdate(req, res) {
     }
 }
 
+// Initialize WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+
+// Handle WebSocket connections
+wss.on('connection', (ws) => {
+    logger.info('New WebSocket connection established');
+    firehoseQueues.add(ws);
+    
+    // Send test message
+    try {
+        const testMsg = Buffer.from('Test connection message');
+        ws.send(testMsg);
+        logger.info('Test message sent to new client');
+    } catch (error) {
+        logger.error('Error sending test message:', error);
+    }
+
+    ws.on('close', () => {
+        logger.info('WebSocket connection closed');
+        firehoseQueues.delete(ws);
+    });
+
+    ws.on('error', (error) => {
+        logger.error('WebSocket error:', error);
+        firehoseQueues.delete(ws);
+    });
+
+    ws.on('message', (message) => {
+        logger.debug('Received message from client:', message);
+    });
+});
+
 // Modify initServer to remove appview connection
 async function initServer() {
     try {
         // Initialize repository
-        repo = await Repo.create(config.DID_PLC, "repo.db", privkeyObj);
+        repo = await Repo.initialize(config.DID_PLC, "repo.db", privkeyObj, null);
         logger.info('Repository initialized successfully');
 
         // Initialize Express app
@@ -737,7 +722,8 @@ async function initServer() {
             shutdown();
         });
         process.on('unhandledRejection', (reason, promise) => {
-            logger.error('Unhandled rejection at:', promise, 'reason:', reason);
+            logger.error('Unhandled rejection at:', promise, 'reason:', reason && reason.stack ? reason.stack : reason);
+            console.error('Unhandled rejection at:', promise, 'reason:', reason);
             shutdown();
         });
 

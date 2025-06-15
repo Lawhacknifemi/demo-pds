@@ -2,9 +2,9 @@ import { CID } from 'multiformats/cid';
 import * as dagCbor from '@ipld/dag-cbor';
 import { sha256 } from 'multiformats/hashes/sha2';
 import { base32 } from 'multiformats/bases/base32';
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import { promisify } from 'util';
-import { MSTNode } from './mst.js';
+import { MSTNode, MST } from './mst.js';
 import { rawSign } from './signing.js';
 import { serialise } from './carfile.js';
 import { randomInt } from 'crypto';
@@ -13,6 +13,7 @@ import pkg from 'base64url';
 import winston from 'winston';
 import config from './config.js';
 import crypto from 'crypto';
+import { EventEmitter } from 'events';
 const { base64url } = pkg;
 
 // Initialize logging with Python-like format
@@ -54,7 +55,7 @@ function base32Encode(bytes) {
 }
 
 function tidNow() {
-    const micros = Math.floor(Date.now() * 1000); // Convert to microseconds
+    const micros = Math.floor(Date.now() * 1000000); // Convert to microseconds to match Python
     const clkid = Math.floor(Math.random() * (1 << 10)); // Random 10-bit number
     const tidInt = (micros << 10) | clkid;
     let output = '';
@@ -121,7 +122,18 @@ class ATNode extends MSTNode {
      * @returns {number}
      */
     static key_height(key) {
-        return key.length;
+        // Convert key to bytes
+        const keyBytes = Buffer.from(key);
+        
+        // Compute SHA-256 hash
+        const hash = crypto.createHash('sha256').update(keyBytes).digest();
+        
+        // Convert to bigint and count leading zero bits
+        const digest = BigInt('0x' + hash.toString('hex'));
+        const leadingZeroes = 256 - digest.toString(2).length;
+        
+        // Return half the number of leading zero bits
+        return Math.floor(leadingZeroes / 2);
     }
 
     /**
@@ -172,295 +184,390 @@ function cleanObject(obj) {
     return cleaned;
 }
 
-class Repo {
-    constructor(did, db, signingKey, tree) {
-        this.did = did;
-        this.con = new sqlite3.Database(db);
-        this.signingKey = signingKey;
-        this.tree = tree;
-
-        // Enable WAL mode
-        this.con.run("pragma journal_mode=wal");
-
-        // Create tables
-        this.con.serialize(() => {
-            this.con.run(`
-                CREATE TABLE IF NOT EXISTS records (
-                    record_key TEXT PRIMARY KEY NOT NULL,
-                    record_cid BLOB NOT NULL
-                )
-            `);
-            this.con.run(`
-                CREATE TABLE IF NOT EXISTS blocks (
-                    block_cid BLOB PRIMARY KEY NOT NULL,
-                    block_value BLOB NOT NULL
-                )
-            `);
-            this.con.run(`
-                CREATE TABLE IF NOT EXISTS commits (
-                    commit_seq INTEGER PRIMARY KEY NOT NULL,
-                    commit_cid BLOB NOT NULL
-                )
-            `);
-            this.con.run(`
-                CREATE TABLE IF NOT EXISTS preferences (
-                    preferences_did TEXT PRIMARY KEY NOT NULL,
-                    preferences_blob BLOB NOT NULL
-                )
-            `);
-            this.con.run(`
-                CREATE TABLE IF NOT EXISTS blobs (
-                    blob_cid BLOB PRIMARY KEY NOT NULL,
-                    blob_data BLOB NOT NULL,
-                    blob_refcount INTEGER NOT NULL
-                )
-            `);
+// Add this before the Repo class
+async function firehoseBroadcast(message) {
+    try {
+        // Log the raw message first
+        logger.info('Raw firehose message:', {
+            type: message?.t,
+            op: message?.op,
+            hasOps: Array.isArray(message?.ops),
+            opsLength: message?.ops?.length,
+            hasBlocks: Array.isArray(message?.blocks),
+            blocksLength: message?.blocks?.length,
+            commit: message?.commit
         });
 
+        // Ensure we have a valid message object
+        if (!message || typeof message !== 'object') {
+            logger.warn('Invalid message format in firehoseBroadcast');
+            return false;
+        }
+
+        // Validate and process blocks first
+        let processedBlocks = [];
+        if (Array.isArray(message.blocks)) {
+            for (const block of message.blocks) {
+                try {
+                    if (!Array.isArray(block) || block.length !== 2) {
+                        logger.warn('Invalid block format:', block);
+                        continue;
+                    }
+                    
+                    const [cid, data] = block;
+                    if (!cid || !data) {
+                        logger.warn('Missing cid or data in block:', block);
+                        continue;
+                    }
+
+                    // Ensure cid and data are Buffers
+                    const cidBuffer = Buffer.isBuffer(cid) ? cid : Buffer.from(cid);
+                    const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+                    
+                    processedBlocks.push([cidBuffer, dataBuffer]);
+                } catch (error) {
+                    logger.error('Error processing block:', error);
+                }
+            }
+        }
+
+        // Create a safe copy of the message with proper structure
+        const safeMessage = {
+            t: message.t || '#commit',
+            op: message.op || 1,
+            ops: Array.isArray(message.ops) ? message.ops.map(op => ({
+                action: op?.action || 'create',
+                path: op?.path || '',
+                cid: op?.cid || ''
+            })) : [],
+            seq: message.seq || Math.floor(Date.now() * 1000),
+            rev: message.rev || 0,
+            repo: message.repo || '',
+            time: message.time || new Date().toISOString().replace('.000Z', 'Z'),
+            blobs: Array.isArray(message.blobs) ? message.blobs : [],
+            blocks: processedBlocks,
+            commit: message.commit || ''
+        };
+
+        // Log the processed message structure
+        logger.info('Processed message structure:', {
+            type: safeMessage.t,
+            op: safeMessage.op,
+            hasOps: Array.isArray(safeMessage.ops),
+            opsLength: safeMessage.ops.length,
+            hasBlocks: Array.isArray(safeMessage.blocks),
+            blocksLength: safeMessage.blocks.length,
+            blocksFormat: safeMessage.blocks.map(block => ({
+                isArray: Array.isArray(block),
+                length: block.length,
+                cidType: block[0] ? 'Buffer' : 'undefined',
+                dataType: block[1] ? 'Buffer' : 'undefined',
+                cidLength: block[0]?.length || 0,
+                dataLength: block[1]?.length || 0
+            }))
+        });
+
+        // Log the full message
+        logger.info('Firehose broadcast:', JSON.stringify(safeMessage, null, 2));
+        return true;
+    } catch (error) {
+        logger.error('Error in firehoseBroadcast:', error);
+        logger.error('Error stack:', error.stack);
+        // Don't throw the error, just log it and continue
+        return false;
+    }
+}
+
+// Add this helper function before the Repo class
+function generateRkey() {
+    const bytes = crypto.randomBytes(8);
+    return base32Encode(bytes);
+}
+
+class Repo extends EventEmitter {
+    constructor(did, db, signingKey, tree) {
+        super(); // Call EventEmitter constructor
+        this.did = did;
+        this.con = new Database(db);
+        this.signingKey = signingKey;
+        this.tree = new MST(ATNode.empty_root());
+    }
+
+    static async initialize(did, db, signingKey, tree) {
+        const repo = new Repo(did, db, signingKey, tree);
+        
+        // Initialize database tables
+        repo.con.exec(`
+            -- Drop existing tables to ensure clean schema
+            DROP TABLE IF EXISTS blocks;
+            DROP TABLE IF EXISTS commits;
+            DROP TABLE IF EXISTS blobs;
+            DROP TABLE IF EXISTS repos;
+            DROP TABLE IF EXISTS records;
+
+            -- Create tables
+            CREATE TABLE blocks (
+                block_cid BLOB PRIMARY KEY NOT NULL,
+                block_value BLOB NOT NULL
+            );
+
+            CREATE TABLE commits (
+                commit_seq INTEGER PRIMARY KEY NOT NULL,
+                commit_cid BLOB NOT NULL,
+                block_value BLOB NOT NULL
+            );
+
+            CREATE TABLE blobs (
+                blob_cid BLOB PRIMARY KEY NOT NULL,
+                blob_data BLOB NOT NULL,
+                blob_refcount INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE repos (
+                did TEXT PRIMARY KEY NOT NULL,
+                root TEXT NOT NULL,
+                rev TEXT NOT NULL
+            );
+
+            CREATE TABLE records (
+                rkey TEXT NOT NULL,
+                collection TEXT NOT NULL,
+                cid TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                commit_cid TEXT NOT NULL,
+                prev_cid TEXT,
+                data BLOB NOT NULL,
+                PRIMARY KEY (rkey, collection, repo)
+            );
+        `);
+
         // Create initial commit if needed
-        this.con.get("SELECT * FROM commits WHERE commit_seq=0", async (err, row) => {
-            if (err) throw err;
-            if (!row) {
+        const row = repo.con.prepare("SELECT * FROM commits WHERE commit_seq=0").get();
+        if (!row) {
+            try {
+                // Get the root node's CID and serialised data
+                const rootCid = await repo.tree.root.getCid();
+                const rootSerialised = await repo.tree.root.getSerialised();
+                
                 const commit = cleanObject({
                     version: 3,
-                    data: this.tree.cid.toString(),
+                    data: rootCid.toString(),
                     rev: tidNow(),
-                    did: this.did,
+                    did: repo.did,
                     prev: null
                 });
                 
                 const commitBlob = dagCbor.encode(commit);
                 const commitCid = await hashToCid(commitBlob);
-                commit.sig = rawSign(this.signingKey, commitBlob);
+                const sig = await rawSign(repo.signingKey, commitBlob);
+                commit.sig = sig;
 
-                this.con.serialize(() => {
-                    this.con.run(
-                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
-                        [Buffer.from(this.tree.cid.bytes), this.tree.value || Buffer.from([])]
-                    );
-                    this.con.run(
-                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)",
-                        [Buffer.from(commitCid.bytes), commitBlob]
-                    );
-                    this.con.run(
-                        "INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)",
-                        [0, Buffer.from(commitCid.bytes)]
-                    );
-                });
+                repo.con.transaction(() => {
+                    repo.con.prepare(
+                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                    ).run(Buffer.from(rootCid.bytes), rootSerialised);
+                    
+                    repo.con.prepare(
+                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                    ).run(Buffer.from(commitCid.bytes), commitBlob);
+                    
+                    repo.con.prepare(
+                        "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
+                    ).run(0, Buffer.from(commitCid.bytes), commitBlob);
+                })();
+            } catch (error) {
+                logger.error('Error creating initial commit:', error);
+                throw error;
             }
-        });
-
-        // Load existing records
-        this.con.each("SELECT record_key, record_cid FROM records", (err, row) => {
-            if (err) throw err;
-            this.tree.put(row.record_key, CID.decode(row.record_cid));
-        });
-    }
-
-    static async create(did, db, signingKey) {
-        const tree = ATNode.empty_root();
-        const emptyRootData = dagCbor.encode({});
-        const emptyRootCid = await hashToCid(emptyRootData);
-        return new Repo(did, db, signingKey, tree);
-    }
-
-    async createRecord(collection, record, rkey = null) {
-        try {
-            logger.info('Creating new record');
-            logger.debug('Request body:', { repo: this.did, collection, record });
-
-            // Generate rkey if not provided
-            if (!rkey) {
-                rkey = base32Encode(Buffer.from(crypto.getRandomValues(new Uint8Array(10))));
-            }
-
-            const recordKey = `${collection}/${rkey}`;
-            logger.debug('Creating record in collection:', collection, 'rkey:', rkey);
-
-            // Clean the record
-            const cleanedRecord = cleanObject(record);
-            logger.debug('Cleaned record:', cleanedRecord);
-
-            // Handle blob references
-            const referencedBlobs = new Set();
-            for (const blob of enumerateRecordCids(cleanedRecord)) {
-                await this.increfBlob(blob);
-                referencedBlobs.add(blob);
-            }
-
-            // Create the record value
-            const valueBlob = dagCbor.encode(cleanedRecord);
-            const valueCid = await hashToCid(valueBlob);
-            
-            // Collect all blocks that need to be stored
-            const dbBlockInserts = [[Buffer.from(valueCid.bytes), valueBlob]];
-
-            // Update the MST
-            const newBlocks = new Set();
-            this.tree = this.tree.put(recordKey, valueCid.toString(), newBlocks);
-            for (const block of newBlocks) {
-                dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
-            }
-
-            // Get previous commit
-            const prevCommit = await new Promise((resolve, reject) => {
-                this.con.get(
-                    "SELECT commit_seq, commit_cid, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
-                    (err, row) => {
-                        if (err) reject(err);
-                        resolve(row || null);
-                    }
-                );
-            });
-
-            let prevCommitCid = null;
-            let prevCommitRev = null;
-            
-            if (prevCommit) {
-                try {
-                    const prevCommitData = dagCbor.decode(prevCommit.block_value);
-                    prevCommitCid = CID.decode(prevCommit.commit_cid);
-                    prevCommitRev = prevCommitData.rev;
-                } catch (err) {
-                    logger.error('Error decoding previous commit:', err);
-                }
-            }
-
-            // Create new commit
-            const newCommitRev = tidNow();
-            const commit = cleanObject({
-                version: 3,
-                data: this.tree.cid.toString(),
-                rev: newCommitRev,
-                prev: prevCommitCid ? prevCommitCid.toString() : null,
-                did: this.did
-            });
-
-            // Sign the commit
-            const commitBytes = dagCbor.encode(commit);
-            const commitSig = await rawSign(this.signingKey, commitBytes);
-            commit.sig = commitSig;
-
-            const signedCommitBlob = dagCbor.encode(commit);
-            const commitCid = await hashToCid(signedCommitBlob);
-            dbBlockInserts.push([Buffer.from(commitCid.bytes), signedCommitBlob]);
-
-            // Get next sequence number
-            const nextSeq = await new Promise((resolve, reject) => {
-                this.con.get("SELECT MAX(commit_seq) as max_seq FROM commits", (err, row) => {
-                    if (err) reject(err);
-                    resolve((row?.max_seq ?? -1) + 1);
-                });
-            });
-
-            // Create the firehose commit message
-            const firehoseCommit = {
-                seq: nextSeq,
-                rebase: false,
-                tooBig: false,
-                repo: this.did,
-                commit: commitCid,
-                prev: prevCommitCid ? prevCommitCid.toString() : null,
-                rev: newCommitRev,
-                since: prevCommitRev || null,
-                time: new Date().toISOString().replace('.000Z', 'Z'),
-                blocks: Buffer.alloc(0), // Will be filled by serialise
-                ops: [{
-                    action: 'create',
-                    path: recordKey,
-                    cid: valueCid.toString()
-                }],
-                blobs: Array.from(referencedBlobs).map(cid => cid.toString())
-            };
-
-            // Prepare blocks for CAR serialization
-            // Include the commit, record, and all MST blocks
-            const blocksForCar = new Map();
-            
-            // Add commit block
-            blocksForCar.set(commitCid.toString(), signedCommitBlob);
-            
-            // Add record block
-            blocksForCar.set(valueCid.toString(), valueBlob);
-            
-            // Add MST blocks
-            for (const block of newBlocks) {
-                blocksForCar.set(block.cid.toString(), block.serialised);
-            }
-            
-            // Add root block if not already included
-            if (this.tree.cid && !blocksForCar.has(this.tree.cid.toString())) {
-                blocksForCar.set(this.tree.cid.toString(), this.tree.value || dagCbor.encode({}));
-            }
-
-            // Convert to format expected by serialise function
-            const carBlocksArray = Array.from(blocksForCar.entries()).map(([cidStr, data]) => [
-                Buffer.from(CID.parse(cidStr).bytes),
-                data
-            ]);
-
-            // Create the firehose message as a proper CAR file
-            logger.info('Creating firehose CAR message');
-            const firehoseCarBlocks = await serialise([commitCid], carBlocksArray);
-            
-            // The firehose message should be the commit data + the CAR blocks
-            firehoseCommit.blocks = firehoseCarBlocks;
-            
-            // Final firehose message format - wrap in #commit event
-            const finalFirehoseMessage = dagCbor.encode({
-                t: "#commit",
-                op: 1,
-                seq: nextSeq,
-                rebase: false,
-                tooBig: false,
-                repo: this.did,
-                commit: commitCid.toString(),
-                prev: prevCommitCid ? prevCommitCid.toString() : null,
-                rev: newCommitRev,
-                since: prevCommitRev || null,
-                time: new Date().toISOString().replace('.000Z', 'Z'),
-                blocks: firehoseCarBlocks,
-                ops: [{
-                    action: 'create',
-                    path: recordKey,
-                    cid: valueCid.toString()
-                }],
-                blobs: Array.from(referencedBlobs).map(cid => cid.toString())
-            });
-
-            // Insert blocks into database
-            await new Promise((resolve, reject) => {
-                this.con.run("BEGIN TRANSACTION");
-                const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
-                for (const [cid, value] of dbBlockInserts) {
-                    stmt.run([cid, value]);
-                }
-                stmt.finalize();
-
-                // Update records
-                this.con.run("INSERT OR REPLACE INTO records (record_key, record_cid) VALUES (?, ?)", 
-                    [recordKey, Buffer.from(valueCid.bytes)]);
-
-                // Insert commit
-                this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
-                    [nextSeq, Buffer.from(commitCid.bytes)], (err) => {
-                        if (err) {
-                            reject(err);
-                            return;
-                        }
-                        this.con.run("COMMIT", (err) => {
-                            if (err) reject(err);
-                            else resolve();
-                        });
-                    });
-            });
-
-            logger.info(`Record created successfully. URI: at://${this.did}/${recordKey}, CID: ${valueCid}`);
-            return [`at://${this.did}/${recordKey}`, valueCid, finalFirehoseMessage];
-        } catch (err) {
-            logger.error('Error in createRecord:', err);
-            throw err;
         }
+
+        return repo;
+    }
+
+    async putRecord(record) {
+        const recordBytes = dagCbor.encode(record);
+        const recordCid = await hashToCid(recordBytes);
+        
+        return new Promise((resolve, reject) => {
+            this.con.transaction(() => {
+                this.con.prepare(
+                    "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                ).run(Buffer.from(recordCid.bytes), recordBytes);
+            });
+            resolve(recordCid);
+        });
+    }
+
+    async validateRecord(collection, record) {
+        console.log('Validating record:', { collection, record });
+        
+        if (!record || typeof record !== 'object') {
+            console.error('Invalid record:', record);
+            throw new Error('Invalid record: must be an object');
+        }
+
+        // Basic validation for app.bsky.feed.post
+        if (collection === 'app.bsky.feed.post') {
+            if (!record.text || typeof record.text !== 'string') {
+                throw new Error('Invalid post: must have text field');
+            }
+            if (!record.createdAt || typeof record.createdAt !== 'string') {
+                throw new Error('Invalid post: must have createdAt field');
+            }
+            // Validate createdAt is a valid ISO date
+            try {
+                new Date(record.createdAt);
+            } catch (e) {
+                throw new Error('Invalid post: createdAt must be a valid ISO date');
+            }
+        }
+
+        return true;
+    }
+
+    async createRecord(collection, repo, record, rkey = null, validate = true) {
+        console.log('Starting createRecord:', { collection, repo, record, rkey, validate });
+        
+        if (!record || typeof record !== 'object') {
+            console.error('Invalid record:', record);
+            throw new Error('Invalid record: must be an object');
+        }
+
+        if (!collection || typeof collection !== 'string') {
+            console.error('Invalid collection:', collection);
+            throw new Error('Invalid collection: must be a string');
+        }
+
+        if (!repo || typeof repo !== 'string') {
+            console.error('Invalid repo:', repo);
+            throw new Error('Invalid repo: must be a string');
+        }
+
+        const recordKey = rkey || tidNow();
+        const fullKey = `${collection}/${recordKey}`;
+        
+        if (validate) {
+            await this.validateRecord(collection, record);
+        }
+        
+        // Handle blob references
+        if (record.blobs) {
+            for (const blob of record.blobs) {
+                if (blob.ref) {
+                    blob.ref = CID.parse(blob.ref.$link);
+                }
+            }
+        }
+        
+        // Clean the record to remove any undefined values
+        const cleanedRecord = cleanObject(record);
+        console.log('Cleaned record:', cleanedRecord);
+        
+        // Encode the record
+        const recordBytes = dagCbor.encode(cleanedRecord);
+        const recordCid = await hashToCid(recordBytes);
+        
+        // Update MST
+        this.tree = await this.tree.set(fullKey, recordCid);
+        
+        // Get the root CID and serialized data
+        const rootCid = await this.tree.getCid();
+        const rootSerialised = await this.tree.getSerialised();
+        
+        console.log('Root CID:', rootCid.toString());
+        console.log('Root serialised length:', rootSerialised.length);
+        
+        // Get the latest commit
+        const latestCommit = this.con.prepare(
+            "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+        ).get();
+        
+        // Create new commit
+        const commit = cleanObject({
+            version: 3,
+            data: rootCid.toString(),
+            rev: tidNow(),
+            prev: latestCommit ? latestCommit.block_value : null,
+            did: this.did
+        });
+        
+        // Sign the commit
+        const commitBytes = dagCbor.encode(commit);
+        const commitCid = await hashToCid(commitBytes);
+        const signature = await rawSign(this.signingKey, commitBytes);
+        commit.sig = signature;
+        
+        // Store blocks in database
+        this.con.transaction(() => {
+            // Store record block
+            this.con.prepare(
+                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+            ).run(Buffer.from(recordCid.bytes), recordBytes);
+            
+            // Store root block
+            this.con.prepare(
+                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+            ).run(Buffer.from(rootCid.bytes), rootSerialised);
+            
+            // Store commit block
+            this.con.prepare(
+                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+            ).run(Buffer.from(commitCid.bytes), commitBytes);
+            
+            // Update records table
+            this.con.prepare(`
+                INSERT INTO records (rkey, collection, cid, repo, commit_cid, prev_cid, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), recordBytes);
+            
+            // Update commits table
+            const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+            const nextSeq = (row?.max_seq ?? -1) + 1;
+            this.con.prepare(
+                "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
+            ).run(nextSeq, Buffer.from(commitCid.bytes), commitBytes);
+        })();
+        
+        // Update head
+        this.head = commitCid;
+
+        // Create firehose message in Python format
+        const header = dagCbor.encode({
+            t: "#commit",
+            op: 1
+        });
+
+        const body = dagCbor.encode({
+            ops: [{
+                cid: recordCid,
+                path: fullKey,
+                action: "create"
+            }],
+            seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
+            rev: commit.rev,
+            since: latestCommit?.block_value?.rev || null,
+            prev: null,
+            repo: this.did,
+            time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
+            blobs: [],
+            blocks: [commitCid, recordCid, rootCid].map(cid => ({
+                cid: cid.toString(),
+                bytes: Buffer.from(cid.bytes).toString('base64')
+            })),
+            commit: commitCid.toString(),
+            rebase: false,
+            tooBig: false
+        });
+
+        // Concatenate the two parts like Python does
+        const firehoseMsg = Buffer.concat([header, body]);
+        
+        return {
+            uri: `at://${repo}/${collection}/${recordKey}`,
+            cid: recordCid.toString(),
+            commitCid: commitCid.toString(),
+            firehoseMsg
+        };
     }
 
     async deleteRecord(collection, rkey) {
@@ -476,21 +583,15 @@ class Repo {
             
             const dbBlockInserts = [];
             const newBlocks = new Set();
-            this.tree = this.tree.delete(recordKey, newBlocks);
+            this.tree.delete(recordKey, newBlocks);
             for (const block of newBlocks) {
                 dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
             }
             
             // Get previous commit
-            const prevCommit = await new Promise((resolve, reject) => {
-                this.con.get(
-                    "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1",
-                    (err, row) => {
-                        if (err) reject(err);
-                        resolve(row);
-                    }
-                );
-            });
+            const prevCommit = this.con.prepare(
+                "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1"
+            ).get();
             
             const prevCommitData = dagCbor.decode(prevCommit.block_value);
             
@@ -541,22 +642,17 @@ class Repo {
             
             // Insert blocks into database
             await new Promise((resolve, reject) => {
-                this.con.run("BEGIN TRANSACTION");
-                const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
-                for (const [cid, value] of dbBlockInserts) {
-                    stmt.run([cid, value]);
-                }
-                stmt.finalize();
-                
-                // Delete record
-                this.con.run("DELETE FROM records WHERE record_key = ?", [recordKey]);
-                
-                // Get the next commit sequence number
-                this.con.get("SELECT MAX(commit_seq) as max_seq FROM commits", (err, row) => {
-                    if (err) {
-                        reject(err);
-                        return;
+                this.con.transaction(() => {
+                    const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
+                    for (const [cid, value] of dbBlockInserts) {
+                        stmt.run([cid, value]);
                     }
+                    
+                    // Delete record
+                    this.con.run("DELETE FROM records WHERE record_key = ?", [recordKey]);
+                    
+                    // Get the next commit sequence number
+                    const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
                     const nextSeq = (row?.max_seq ?? -1) + 1;
                     
                     // Insert commit with the next sequence number
@@ -566,10 +662,7 @@ class Repo {
                                 reject(err);
                                 return;
                             }
-                            this.con.run("COMMIT", (err) => {
-                                if (err) reject(err);
-                                else resolve();
-                            });
+                            resolve();
                         });
                 });
             });
@@ -615,43 +708,30 @@ class Repo {
         });
     }
 
-    async getRecord(collection, rkey) {
-        return new Promise((resolve, reject) => {
-            const recordKey = `${collection}/${rkey}`;
-            this.con.get(
-                "SELECT record_cid FROM records WHERE record_key = ?",
-                [recordKey],
-                (err, row) => {
-                    if (err) return reject(err);
-                    if (!row) return reject(new Error("Record not found"));
-                    const recordCid = CID.decode(row.record_cid);
-                    this.con.get(
-                        "SELECT block_value FROM blocks WHERE block_cid = ?",
-                        [row.record_cid],
-                        async (err2, row2) => {
-                            if (err2) return reject(err2);
-                            if (!row2) return reject(new Error("Block not found for record"));
-                            const value = row2.block_value;
-                            const uri = `at://${this.did}/${collection}/${rkey}`;
-                            resolve([uri, recordCid, value]);
-                        }
-                    );
-                }
-            );
-        });
+    async getRecord(uri, cid) {
+        try {
+            const record = this.con.prepare(
+                'SELECT * FROM records WHERE uri = ? AND (cid = ? OR ? IS NULL)'
+            ).get(uri, cid, cid);
+            if (!record) {
+                return null;
+            }
+            return {
+                uri,
+                cid: record.cid,
+                value: await this.getBlock(record.cid)
+            };
+        } catch (error) {
+            logger.error('Error in getRecord:', error);
+            throw error;
+        }
     }
 
     async getPreferences() {
-        return new Promise((resolve, reject) => {
-            this.con.get(
-                "SELECT preferences_blob FROM preferences WHERE preferences_did = ?",
-                [this.did],
-                (err, row) => {
-                    if (err) reject(err);
-                    resolve(row ? row.preferences_blob : dagCbor.encode({ preferences: [] }));
-                }
-            );
-        });
+        const row = this.con.prepare(
+            "SELECT preferences_blob FROM preferences WHERE preferences_did = ?"
+        ).get(this.did);
+        return row ? row.preferences_blob : dagCbor.encode({ preferences: [] });
     }
 
     async putPreferences(blob) {
@@ -687,32 +767,20 @@ class Repo {
     }
 
     async getBlob(cid) {
-        return new Promise((resolve, reject) => {
-            this.con.get(
-                "SELECT blob_data FROM blobs WHERE blob_cid = ? AND blob_refcount > 0",
-                [cid.toString()],
-                (err, row) => {
-                    if (err) reject(err);
-                    if (!row) reject(new Error("Blob not found"));
-                    resolve(row.blob_data);
-                }
-            );
-        });
+        const row = this.con.prepare(
+            "SELECT blob_data FROM blobs WHERE blob_cid = ? AND blob_refcount > 0"
+        ).get(cid.toString());
+        if (!row) throw new Error("Blob not found");
+        return row.blob_data;
     }
 
     async getCheckout(commit = null) {
         try {
             // If no commit specified, get the latest commit
             if (!commit) {
-                const latestCommit = await new Promise((resolve, reject) => {
-                    this.con.get(
-                        "SELECT commit_seq, commit_cid FROM commits ORDER BY commit_seq DESC LIMIT 1",
-                        (err, row) => {
-                            if (err) reject(err);
-                            resolve(row);
-                        }
-                    );
-                });
+                const latestCommit = this.con.prepare(
+                    "SELECT commit_seq, commit_cid FROM commits ORDER BY commit_seq DESC LIMIT 1"
+                ).get();
                 if (!latestCommit) {
                     throw new Error("No commits found");
                 }
@@ -742,6 +810,166 @@ class Repo {
             logger.error('Error in getCheckout:', err);
             throw err;
         }
+    }
+
+    async getRepo(did) {
+        try {
+            const repo = this.con.prepare(
+                'SELECT * FROM repos WHERE did = ?'
+            ).get(did);
+            if (!repo) {
+                return null;
+            }
+            return {
+                did,
+                root: repo.root,
+                rev: repo.rev
+            };
+        } catch (error) {
+            logger.error('Error in getRepo:', error);
+            throw error;
+        }
+    }
+
+    async getBlocks(did, cids) {
+        try {
+            const blocks = [];
+            for (const cid of cids) {
+                const block = await this.getBlock(cid);
+                if (block) {
+                    blocks.push({
+                        cid,
+                        data: block
+                    });
+                }
+            }
+            return blocks;
+        } catch (error) {
+            logger.error('Error in getBlocks:', error);
+            throw error;
+        }
+    }
+
+    async getCommitPath(did, latest, earliest) {
+        try {
+            const commits = await this.con.all(
+                'SELECT * FROM commits WHERE did = ? AND rev <= ? AND rev >= ? ORDER BY rev DESC',
+                [did, latest, earliest || 0]
+            );
+            if (!commits.length) {
+                return null;
+            }
+            return commits.map(commit => ({
+                cid: commit.cid,
+                rev: commit.rev
+            }));
+        } catch (error) {
+            logger.error('Error in getCommitPath:', error);
+            throw error;
+        }
+    }
+
+    async listRepos(limit = 50, cursor = null) {
+        try {
+            const repos = await this.con.all(
+                'SELECT * FROM repos WHERE did > ? ORDER BY did LIMIT ?',
+                [cursor || '', limit]
+            );
+            return {
+                repos: repos.map(repo => ({
+                    did: repo.did,
+                    root: repo.root,
+                    rev: repo.rev
+                })),
+                cursor: repos.length === limit ? repos[repos.length - 1].did : null
+            };
+        } catch (error) {
+            logger.error('Error in listRepos:', error);
+            throw error;
+        }
+    }
+
+    async notifyOfUpdate(hostname) {
+        try {
+            await this.con.run(
+                'INSERT OR REPLACE INTO updates (hostname, last_update) VALUES (?, ?)',
+                [hostname, Date.now()]
+            );
+        } catch (error) {
+            logger.error('Error in notifyOfUpdate:', error);
+            throw error;
+        }
+    }
+
+    async requestCrawl(hostname) {
+        try {
+            const update = this.con.prepare(
+                'SELECT * FROM updates WHERE hostname = ?'
+            ).get(hostname);
+            if (!update) {
+                return;
+            }
+            // Implement crawl logic here
+        } catch (error) {
+            logger.error('Error in requestCrawl:', error);
+            throw error;
+        }
+    }
+
+    async createCommit(recordKey, recordCid) {
+        logger.info('Creating commit for record:', recordKey);
+        
+        try {
+            // Get the latest commit
+            const latestCommit = this.con.prepare(
+                "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1"
+            ).get();
+
+            // Ensure tree is initialized
+            if (!this.tree || !this.tree.root) {
+                logger.error('Tree not properly initialized');
+                throw new Error('Tree not properly initialized');
+            }
+
+            // Get the tree CID
+            const treeCid = await this.tree.getCid();
+            if (!treeCid) {
+                logger.error('Tree CID not available');
+                throw new Error('Tree CID not available');
+            }
+
+            // Create new commit
+            const newCommitRev = tidNow();
+            const commit = cleanObject({
+                version: 3,
+                data: treeCid.toString(),
+                rev: newCommitRev,
+                prev: latestCommit ? latestCommit.block_value : null,
+                did: this.did
+            });
+
+            logger.info('Created commit object:', commit);
+            return commit;
+        } catch (error) {
+            logger.error('Error in createCommit:', error);
+            throw error;
+        }
+    }
+
+    async signCommit(commit) {
+        logger.info('Signing commit');
+        
+        // Encode the commit
+        const commitBytes = dagCbor.encode(commit);
+        
+        // Sign the commit
+        const commitSig = await rawSign(this.signingKey, commitBytes);
+        
+        // Add signature to commit
+        commit.sig = commitSig;
+        
+        logger.info('Commit signed successfully');
+        return commit;
     }
 }
 
