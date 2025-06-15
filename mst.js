@@ -5,6 +5,16 @@ import * as dagCbor from '@ipld/dag-cbor';
 import { sha256 } from 'multiformats/hashes/sha2';
 
 /**
+ * Helper function to create a CID from a buffer
+ * @param {Uint8Array} bytes - The bytes to create a CID from
+ * @returns {Promise<CID>} The created CID
+ */
+async function hashToCid(bytes) {
+    const hash = await sha256.digest(bytes);
+    return CID.create(1, 0x71, hash);
+}
+
+/**
  * Helper function to calculate shared prefix length between two buffers
  * @param {Buffer} a - First buffer
  * @param {Buffer} b - Second buffer
@@ -85,9 +95,10 @@ function tupleRemoveAt(arr, index) {
         this.subtrees = Object.freeze([...subtrees]);
         this.keys = Object.freeze([...keys]);
         this.vals = Object.freeze([...vals]);
+        
+        // Private properties for caching
         this._serialised = null;
         this._cid = null;
-        this.outdatedPointer = false;
     }
 
     /**
@@ -207,50 +218,47 @@ function tupleRemoveAt(arr, index) {
      * @param {string} key
      * @param {any} val
      * @param {Set<MSTNode>} created
-     * @returns {MSTNode}
+     * @returns {Promise<MSTNode>}
      */
-    put(key, val, created) {
+    async put(key, val, created = new Set()) {
         console.log('Putting key:', key, 'value:', val, 'in node with keys:', this.keys);
-        if (this.subtrees.length === 1 && this.subtrees[0] === null) { // special case for empty tree
-            console.log('Empty tree case, putting here');
-        return this._put_here(key, val, created);
-      }
-        console.log('Recursive put, key height:', this.constructor.key_height(key), 'tree height:', this.height());
-      return this._put_recursive(key, val, this.constructor.key_height(key), this.height(), created);
-    }
-  
-    _put_recursive(key, val, key_height, tree_height, created) {
-        console.log('_put_recursive:', {key, key_height, tree_height});
-        if (typeof key !== 'string') {
-            throw new Error('Key must be a string');
-        }
-        if (val === undefined || val === null) {
-            throw new Error('Value cannot be undefined or null');
-        }
-        if (!(created instanceof Set)) {
-            throw new Error('created must be a Set');
-        }
-
-        const i = this._gteIndex(key);
         
-        if (i < this.keys.length && this.keys[i] === key) {
-            // Key exists, replace value
+        if (this.keys.length === 0) {
+            console.log('Empty tree case, putting here');
             return this._put_here(key, val, created);
         }
+
+        const keyHeight = this.constructor.key_height(key);
+        const treeHeight = this.height();
         
-        if (this.subtrees[0] === null) {
-            // Leaf node, insert here
-      return this._put_here(key, val, created);
-    }
-  
-        // Internal node, recurse
-        const newSubtrees = [...this.subtrees];
-        newSubtrees[i] = this.subtrees[i].put(key, val, created);
+        if (keyHeight > treeHeight) {
+            // Need to grow the tree
+            const newRoot = new this.constructor(
+                [this],
+                [],
+                []
+            );
+            created.add(newRoot);
+            return await newRoot.put(key, val, created);
+        }
         
-        // Create new node with updated subtrees
-        const newNode = new this.constructor(newSubtrees, this.keys, this.vals);
-        created.add(newNode);
-        return newNode;
+        if (keyHeight < treeHeight) {
+            // Need to look below
+            const i = this._gteIndex(key);
+            const newSubtrees = [...this.subtrees];
+            newSubtrees[i] = await this.constructor._fromOptional(newSubtrees[i]).put(key, val, created);
+            
+            const newNode = new this.constructor(
+                newSubtrees,
+                this.keys,
+                this.vals
+            );
+            created.add(newNode);
+            return newNode;
+        }
+        
+        // Can insert here
+        return this._put_here(key, val, created);
     }
 
     /**
@@ -259,33 +267,125 @@ function tupleRemoveAt(arr, index) {
      * @param {Set<MSTNode>} created
      * @returns {MSTNode}
      */
-    _put_here(key, val, created = new Set()) {
-        console.log('_put_here:', {key, val});
-      const cls = this.constructor;
-      
-        const i = this._gteIndex(key);
-      if (i < this.keys.length && this.keys[i] === key) {
-        if (this.vals[i] === val) {
-          return this;
+    async _put_here(key, val, created = new Set()) {
+        console.log('_put_here called with:', { key, val });
+        if (val === undefined) {
+            throw new Error('Value cannot be undefined');
         }
-            const newNode = new cls(
-                this.subtrees,
-                this.keys,
-                tupleReplaceAt(this.vals, i, val)
-            );
-            created.add(newNode);
-            return newNode;
+
+        const keyBytes = Buffer.from(key);
+        const insertionIndex = this.keys.findIndex(k => k > key);
+        console.log('Found insertion index:', insertionIndex);
+
+        if (insertionIndex === -1) {
+            // Key doesn't exist, create new node with updated arrays
+            console.log('Creating new node with key-value pair');
+            const newSubtrees = [...this.subtrees, null];
+            const newKeys = [...this.keys, key];
+            const newVals = [...this.vals, val];
+
+            console.log('New node data:', {
+                subtreesLength: newSubtrees.length,
+                keys: newKeys,
+                vals: newVals
+            });
+
+            // Create the node first
+            const node = new MSTNode(newSubtrees, newKeys, newVals);
+            console.log('Initializing node serialization');
+
+            // Initialize the node's serialized data
+            const entries = [];
+            let prevKey = Buffer.from('');
+
+            for (let i = 0; i < newKeys.length; i++) {
+                const keyBytes = Buffer.from(newKeys[i]);
+                const sharedPrefixLen = getSharedPrefixLength(prevKey, keyBytes);
+                
+                // Get the subtree CID if it exists
+                let subtreeCid = null;
+                if (newSubtrees[i + 1]) {
+                    try {
+                        subtreeCid = await newSubtrees[i + 1].getCid();
+                    } catch (error) {
+                        console.error('Error getting subtree CID:', error);
+                        throw error;
+                    }
+                }
+
+                // Ensure the value is not undefined and properly serialize CID
+                const value = newVals[i];
+                if (value === undefined) {
+                    throw new Error('Value cannot be undefined');
+                }
+
+                // If value is a CID, convert it to a proper format
+                let serializedValue = value;
+                if (value instanceof CID) {
+                    serializedValue = {
+                        '/': value.toString()
+                    };
+                }
+
+                // Create entry with proper CID format for subtree and convert Buffer to Uint8Array
+                const entry = {
+                    k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
+                    p: sharedPrefixLen,
+                    t: subtreeCid ? { '/': subtreeCid.toString() } : null,
+                    v: serializedValue
+                };
+
+                console.log('Created entry:', JSON.stringify(entry));
+                entries.push(entry);
+                prevKey = keyBytes;
+            }
+
+            // Get the left subtree CID if it exists
+            let leftSubtreeCid = null;
+            if (newSubtrees[0]) {
+                try {
+                    leftSubtreeCid = await newSubtrees[0].getCid();
+                } catch (error) {
+                    console.error('Error getting left subtree CID:', error);
+                    throw error;
+                }
+            }
+
+            // Create a valid empty node structure with proper CID format
+            const serializable = {
+                e: entries,
+                l: leftSubtreeCid ? { '/': leftSubtreeCid.toString() } : null
+            };
+
+            console.log('Serializable data:', JSON.stringify(serializable));
+            try {
+                // Generate CID for the new node
+                const serialized = dagCbor.encode(serializable);
+                console.log('Serialized data length:', serialized.length);
+                const hash = await sha256.digest(serialized);
+                node._cid = CID.create(1, 0x71, hash);
+                node._serialised = serialized;
+                console.log('Generated CID for new node:', node._cid.toString());
+            } catch (error) {
+                console.error('Error encoding serializable data:', error);
+                console.error('Serializable data:', serializable);
+                throw error;
+            }
+
+            return node;
         }
         
-        // Create new subtrees array with the new key-value pair
-        const newSubtrees = [...this.subtrees.slice(0, i), null, ...this.subtrees.slice(i)];
-        const newKeys = tupleInsertAt(this.keys, i, key);
-        const newVals = tupleInsertAt(this.vals, i, val);
+        // Key exists, replace value
+        console.log('Key exists, replacing value');
+        if (this.vals[insertionIndex] === val) {
+            console.log('Value unchanged, returning existing node');
+            return this;
+        }
         
-        const newNode = new cls(
-            newSubtrees,
-            newKeys,
-            newVals
+        const newNode = new MSTNode(
+            this.subtrees,
+            this.keys,
+            tupleReplaceAt(this.vals, insertionIndex, val)
         );
         created.add(newNode);
         return newNode;
@@ -362,57 +462,180 @@ function tupleRemoveAt(arr, index) {
     }
 
     /**
-     * @returns {CID}
+     * @returns {Promise<CID>}
      */
-    get cid() {
-        if (this._cid === null || this.outdatedPointer) {
-            console.log('Computing CID for node with keys:', this.keys);
-            const serialised = this.serialised;
-            const hash = sha256.digest(serialised);
-            this._cid = CID.create(1, 0x71, hash);
-            this.outdatedPointer = false;
-            console.log('Computed CID:', this._cid.toString());
+    async getCid() {
+        console.log('Getting CID for node');
+        if (this._cid) {
+            console.log('Using cached CID:', this._cid.toString());
+            return this._cid;
         }
-        return this._cid;
+
+        console.log('Generating new CID');
+        const serialized = await this.getSerialised();
+        console.log('Got serialized data, length:', serialized.length);
+
+        try {
+            const hash = await sha256.digest(serialized);
+            console.log('Generated hash:', hash.toString('hex'));
+            this._cid = CID.create(1, 0x71, hash);
+            console.log('Generated CID:', this._cid.toString());
+            return this._cid;
+        } catch (error) {
+            console.error('Error generating CID:', error);
+            throw error;
+        }
     }
 
-    get serialised() {
-        if (this._serialised === null) {
-            console.log('Computing serialized data for node with keys:', this.keys);
-            // Compress key prefixes like in the TypeScript implementation
-            const entries = [];
-            let prevKey = '';
+    /**
+     * @returns {Promise<Uint8Array>}
+     */
+    async getSerialised() {
+        console.log('Getting serialized data for node');
+        if (this._serialised) {
+            console.log('Using cached serialized data');
+            return this._serialised;
+        }
+
+        console.log('Generating new serialized data');
+        const entries = [];
+        let prevKey = Buffer.from('');
+
+        for (let i = 0; i < this.keys.length; i++) {
+            console.log('Processing entry:', i);
+            const keyBytes = Buffer.from(this.keys[i]);
+            const sharedPrefixLen = getSharedPrefixLength(prevKey, keyBytes);
             
-            for (let i = 0; i < this.keys.length; i++) {
-                const key = this.keys[i];
-                const sharedPrefix = getSharedPrefixLength(
-                    Buffer.from(prevKey),
-                    Buffer.from(key)
-                );
-                
-                entries.push({
-                    p: sharedPrefix,
-                    k: key.slice(sharedPrefix),
-                    v: this.vals[i],
-                    t: this.subtrees[i + 1] === null ? null : this.subtrees[i + 1].cid.toString()
-                });
-                
-                prevKey = key;
+            // Get the subtree CID if it exists
+            let subtreeCid = null;
+            if (this.subtrees[i + 1]) {
+                try {
+                    subtreeCid = await this.subtrees[i + 1].getCid();
+                    console.log('Got subtree CID:', subtreeCid.toString());
+                } catch (error) {
+                    console.error('Error getting subtree CID:', error);
+                    throw error;
+                }
             }
 
-            this._serialised = dagCbor.encode({
-                l: this.subtrees[0] === null ? null : this.subtrees[0].cid.toString(),
-                e: entries
-            });
-            console.log('Computed serialized data length:', this._serialised.length);
+            // Ensure the value is not undefined and properly serialize CID
+            const value = this.vals[i];
+            if (value === undefined) {
+                throw new Error('Value cannot be undefined');
+            }
+
+            // If value is a CID, convert it to a proper format
+            let serializedValue = value;
+            if (value instanceof CID) {
+                serializedValue = {
+                    '/': value.toString()
+                };
+            } else if (typeof value === 'string' && value.startsWith('bafy')) {
+                try {
+                    const cid = CID.parse(value);
+                    serializedValue = {
+                        '/': cid.toString()
+                    };
+                } catch (e) {
+                    // Not a valid CID, keep as is
+                }
+            }
+
+            // Create entry with proper CID format for subtree and convert Buffer to Uint8Array
+            const entry = {
+                k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
+                p: sharedPrefixLen,
+                t: subtreeCid ? { '/': subtreeCid.toString() } : null,
+                v: serializedValue
+            };
+
+            console.log('Created entry:', JSON.stringify(entry));
+            entries.push(entry);
+            prevKey = keyBytes;
         }
-        return this._serialised;
+
+        // Get the left subtree CID if it exists
+        let leftSubtreeCid = null;
+        if (this.subtrees[0]) {
+            try {
+                leftSubtreeCid = await this.subtrees[0].getCid();
+                console.log('Got left subtree CID:', leftSubtreeCid.toString());
+            } catch (error) {
+                console.error('Error getting left subtree CID:', error);
+                throw error;
+            }
+        }
+
+        // Create a valid empty node structure with proper CID format
+        const serializable = {
+            e: entries,
+            l: leftSubtreeCid ? { '/': leftSubtreeCid.toString() } : null
+        };
+
+        console.log('Serializable data:', JSON.stringify(serializable));
+        try {
+            // Generate CID for the new node
+            const serialized = dagCbor.encode(serializable);
+            console.log('Serialized data length:', serialized.length);
+            const hash = await sha256.digest(serialized);
+            this._cid = CID.create(1, 0x71, hash);
+            this._serialised = serialized;
+            console.log('Generated CID for new node:', this._cid.toString());
+            return this._serialised;
+        } catch (error) {
+            console.error('Error encoding serializable data:', error);
+            console.error('Serializable data:', serializable);
+            throw error;
+        }
+    }
+
+    // Helper method to check CID state
+    getCidState() {
+        return {
+            hasCid: !!this._cid,
+            cidValue: this._cid?.toString(),
+            hasSerialized: !!this._serialised,
+            serializedLength: this._serialised?.length,
+            keys: this.keys,
+            subtreesLength: this.subtrees.length
+        };
+    }
+
+    // Helper method to verify CID
+    async verifyCid() {
+        console.log('Verifying CID for node with keys:', this.keys);
+        const state = this.getCidState();
+        console.log('Current state:', state);
+
+        if (!this._cid) {
+            console.log('No CID found, generating new one...');
+            await this.getCid();
+        }
+
+        // Verify the CID matches the serialized data
+        const serialized = await this.getSerialised();
+        const computedCid = await hashToCid(serialized);
+        
+        console.log('CID verification:', {
+            storedCid: this._cid.toString(),
+            computedCid: computedCid.toString(),
+            matches: this._cid.toString() === computedCid.toString()
+        });
+
+        return this._cid.toString() === computedCid.toString();
     }
 
     // Helper method to mark the node as needing CID recalculation
     markOutdated() {
-        this.outdatedPointer = true;
+        console.log('Marking node as outdated');
+        console.log('Previous state:', this.getCidState());
         this._cid = null;
+        this._serialised = null;
+        console.log('New state:', this.getCidState());
+    }
+
+    static key_height() {
+        return 1; // For now, we're using a simple flat structure
     }
   }
   
@@ -420,11 +643,8 @@ function tupleRemoveAt(arr, index) {
    * MST wrapper class for mutable interface
    */
 export class MST {
-    /**
-     * @param {MSTNode} root
-     */
-    constructor(root) {
-      this.root = root;
+    constructor(root = null) {
+        this.root = root || MSTNode.emptyRoot();
     }
   
     /**
@@ -445,34 +665,62 @@ export class MST {
     /**
      * @param {string} key
      * @param {any} val
-     * @returns {MST}
+     * @returns {Promise<MST>}
      */
-    set(key, val) {
-      this.root = this.root.put(key, val, new Set());
-      return this;
+    async set(key, val) {
+        console.log('Setting key:', key, 'value:', val);
+        console.log('Current root state:', {
+            keys: this.root.keys,
+            vals: this.root.vals,
+            subtrees: this.root.subtrees.length
+        });
+
+        try {
+            const newRoot = await this.root.put(key, val, new Set());
+            console.log('Created new root');
+
+            // Ensure the new root has a CID and serialized data
+            try {
+                await newRoot.getCid();
+                await newRoot.getSerialised();
+                console.log('New root has CID and serialized data');
+            } catch (error) {
+                console.error('Error ensuring new root has CID and serialized data:', error);
+                throw error;
+            }
+
+            return new MST(newRoot);
+        } catch (error) {
+            console.error('Error in set operation:', error);
+            throw error;
+        }
     }
   
     /**
      * @param {string} key
-     * @returns {MST}
-     * @throws {Error} If key not found
+     * @returns {Promise<MST>}
      */
-    delete(key) {
-      const prev_root = this.root;
-      this.root = this.root.delete(key, new Set());
-      if (this.root === prev_root) {
-        throw new Error(`Key '${key}' not found`);
-      }
-      return this;
+    async delete(key) {
+        const created = new Set();
+        const newRoot = this.root.delete(key, created);
+        
+        // Ensure all created nodes have CIDs
+        for (const node of created) {
+            if (!node._cid) {
+                console.log('Computing CID for created node');
+                await node.getCid();
+            }
+        }
+        
+        return new MST(newRoot);
     }
   
     /**
      * @param {string} key
-     * @param {any} sentinel
-     * @returns {any}
+     * @returns {Promise<any>}
      */
-    get(key, sentinel = null) {
-      return this.root.get(key, sentinel);
+    async get(key) {
+      return this.root.get(key);
     }
   
     /**
@@ -480,19 +728,30 @@ export class MST {
      * @returns {boolean}
      */
     has(key) {
-      return this.get(key) !== null;
+      return this.get(key, null) !== null;
     }
   
     /**
      * @param {string} key_min
      * @param {string} key_max
      * @param {boolean} reverse
-     * @yields {[string, any]}
+     * @returns {Generator<[string, any]>}
      */
     *get_range(key_min, key_max, reverse = false) {
       yield* this.root.get_range(key_min, key_max, reverse);
     }
-  }
+
+    /**
+     * @returns {Promise<CID>}
+     */
+    async getCid() {
+        return await this.root.getCid();
+    }
+
+    async getSerialised() {
+        return await this.root.getSerialised();
+    }
+}
   
   /**
    * Example implementation

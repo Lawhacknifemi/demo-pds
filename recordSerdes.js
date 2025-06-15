@@ -18,20 +18,27 @@ import * as dagCbor from '@ipld/dag-cbor';
  * @param {Object} record - The record to convert
  * @returns {Object} - JSON representation of the record
  */
-function recordToJson(record) {
-    if (Array.isArray(record)) {
-        return record.map(r => recordToJson(r));
+export function recordToJson(record) {
+    if (record === null || record === undefined) {
+        return null;
     }
-    if (record && typeof record === 'object') {
-        if (record instanceof CID) {
-            return { "$link": record.toString() };
+    if (Array.isArray(record)) {
+        return record.map(recordToJson);
+    }
+    if (record instanceof CID) {
+        return { $link: record.toString('base32') };
+    }
+    if (record instanceof Uint8Array) {
+        return { $bytes: Buffer.from(record).toString('base64') };
+    }
+    if (typeof record === 'object') {
+        const result = {};
+        for (const [key, value] of Object.entries(record)) {
+            if (value !== undefined) {
+                result[key] = recordToJson(value);
+            }
         }
-        if (record instanceof Uint8Array) {
-            throw new TypeError("can't represent bytes as JSON");
-        }
-        return Object.fromEntries(
-            Object.entries(record).map(([k, v]) => [k, recordToJson(v)])
-        );
+        return result;
     }
     return record;
 }
@@ -41,19 +48,19 @@ function recordToJson(record) {
  * @param {Object} record - The record to search
  * @returns {Generator<CID>} - Generator yielding all CIDs found
  */
-function* enumerateRecordCids(record) {
-    if (Array.isArray(record)) {
-        for (const r of record) {
-            yield* enumerateRecordCids(r);
-        }
+export function* enumerateRecordCids(record) {
+    if (record === null || record === undefined) {
+        return;
     }
-    if (record && typeof record === 'object') {
-        if (record instanceof CID) {
-            yield record;
-            return;
+    if (Array.isArray(record)) {
+        for (const item of record) {
+            yield* enumerateRecordCids(item);
         }
-        for (const r of Object.values(record)) {
-            yield* enumerateRecordCids(r);
+    } else if (record instanceof CID) {
+        yield record;
+    } else if (typeof record === 'object') {
+        for (const value of Object.values(record)) {
+            yield* enumerateRecordCids(value);
         }
     }
 }
@@ -63,20 +70,27 @@ function* enumerateRecordCids(record) {
  * @param {Object} data - The JSON data to convert
  * @returns {Object} - Record representation
  */
-function jsonToRecord(data) {
-    if (Array.isArray(data)) {
-        return data.map(r => jsonToRecord(r));
+export function jsonToRecord(json) {
+    if (json === null || json === undefined) {
+        return null;
     }
-    if (data && typeof data === 'object') {
-        if (Object.keys(data).length === 1 && '$link' in data) {
-            return CID.parse(data.$link);
+    if (Array.isArray(json)) {
+        return json.map(jsonToRecord);
+    }
+    if (typeof json === 'object') {
+        if ('$link' in json) {
+            return CID.parse(json.$link);
         }
-        return Object.fromEntries(
-            Object.entries(data).map(([k, v]) => [k, jsonToRecord(v)])
-        );
+        if ('$bytes' in json) {
+            return Buffer.from(json.$bytes, 'base64');
+        }
+        const result = {};
+        for (const [key, value] of Object.entries(json)) {
+            if (value !== undefined) {
+                result[key] = jsonToRecord(value);
+            }
+        }
+        return result;
     }
-    return data;
-}
-
-// Export all required functions
-export { recordToJson, jsonToRecord, enumerateRecordCids }; 
+    return json;
+} 

@@ -1,34 +1,30 @@
 {
-  "name": "pds-demo",
+  "name": "demo-pds-js",
   "version": "1.0.0",
-  "description": "AT Protocol PDS Implementation",
-  "main": "pds.js",
+  "description": "JavaScript implementation of ATProto PDS",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node pds.js",
-    "test": "node test_pds.js"
+    "start": "node server.js",
+    "test": "node test.js"
   },
   "dependencies": {
-    "@ipld/car": "^5.4.1",
-    "@ipld/dag-cbor": "^9.2.2",
-    "@noble/curves": "^1.9.0",
-    "@noble/hashes": "^1.3.3",
-    "axios": "^1.6.7",
-    "base32-encode": "^2.0.0",
-    "base64url": "^3.0.1",
-    "cbor": "^10.0.3",
+    "@atproto/api": "^0.3.0",
+    "@ipld/dag-cbor": "^3.0.0",
+    "async-lock": "^1.4.0",
+    "better-sqlite3": "^8.5.0",
+    "buffer": "^6.0.3",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",
     "express": "^4.18.2",
-    "jose": "^5.2.2",
     "jsonwebtoken": "^9.0.2",
-    "multiformats": "^13.3.2",
-    "node-fetch": "^3.3.2",
-    "node-forge": "^1.3.1",
-    "sqlite3": "^5.1.7",
-    "uint8arrays": "^5.1.0",
-    "winston": "^3.11.0",
-    "ws": "^8.16.0",
-    "async-lock": "^1.4.0"
+    "multiformats": "^10.0.0",
+    "sqlite3": "^5.1.6",
+    "winston": "^3.17.0",
+    "ws": "^8.13.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.40.0",
+    "prettier": "^2.8.8"
   }
 }

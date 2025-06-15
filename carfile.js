@@ -1,122 +1,86 @@
 // First, install the required packages:
-// npm install multiformats dag-cbor
+// npm install multiformats @ipld/dag-cbor
 import { CID } from 'multiformats/cid';
 import * as dagCbor from '@ipld/dag-cbor';
-import { sha256 } from 'multiformats/hashes/sha2';
-// const { CID } = require('multiformats');
-// const dagCbor = require('@ipld/dag-cbor');
 
-// LEB128 varint encoding (matches Python's varint_encode)
-function varintEncode(n) {
+// leb128 - exact match to Python's varint_encode
+function varint_encode(n) {
     const result = [];
     while (n) {
-        const [quotient, remainder] = [Math.floor(n / 128), n % 128];
-        n = quotient;
-        result.push(remainder | (n !== 0 ? 128 : 0));
+        const x = n % 128;
+        n = Math.floor(n / 128);
+        result.push(x | ((n !== 0) << 7));
     }
     return new Uint8Array(result);
 }
 
-// Serialize function (matches Python's serialise exactly)
+// note: this function expects block CIDS and values to be pre-serialised, but not roots!
+// exact match to Python's serialise function
 function serialise(roots, blocks) {
-    // Create header with raw CID bytes
-    const header = {
-        version: 1,
-        roots: roots.map(cid => {
-            // Convert CID to raw bytes
-            return cid instanceof CID ? cid.bytes : cid;
-        })
-    };
-    const headerBytes = dagCbor.encode(header);
+    let result = new Uint8Array(0);
     
-    // Start with header length and header
-    let result = Buffer.concat([
-        varintEncode(headerBytes.length),
-        headerBytes
-    ]);
+    const header = dagCbor.encode({
+        "version": 1,
+        "roots": roots
+    });
     
-    // Add each block
+    // Concatenate header length + header
+    const headerLenBytes = varint_encode(header.length);
+    result = concatUint8Arrays(result, headerLenBytes, header);
+    
+    // Process blocks exactly like Python version
     for (const [block_cid, block_data] of blocks) {
-        // Ensure block_cid is raw bytes
-        const cidBytes = block_cid instanceof CID ? block_cid.bytes : block_cid;
-        const blockLength = cidBytes.length + block_data.length;
-        
-        result = Buffer.concat([
-            result,
-            varintEncode(blockLength),
-            cidBytes,
-            block_data
-        ]);
+        const totalLen = block_cid.length + block_data.length;
+        const lenBytes = varint_encode(totalLen);
+        result = concatUint8Arrays(result, lenBytes, block_cid, block_data);
     }
     
     return result;
 }
 
-export { varintEncode, serialise };
-
-// Example usage
-async function main() {
-    // Create test data
-    const testData = new TextEncoder().encode("Hello, World!");
-    
-    // Create SHA-256 hash
-    const hash = await sha256.digest(testData);
-    
-    // Create CID (using the same approach as create_dag_cbor_cid)
-    const cid = CID.create(1, 0x71, hash);
-    
-    // Create blocks array
-    const blocks = [[cid.bytes, testData]];
-    
-    // Serialize
-    const serialized = serialise([cid], blocks);
-    
-    // Print hex representation
-    console.log(Buffer.from(serialized).toString('hex'));
-}
-
-// Run the example
-main().catch(console.error);
-
-// Global variables
-const firehoseQueues = new Set();
-const firehoseQueuesLock = new Map();
-
-async function firehoseBroadcast(msg) {
-    logger.info('Broadcasting firehose message:', msg);
-    const lock = new AsyncLock();
-    await lock.acquire('firehose', async () => {
-        for (const queue of firehoseQueues) {
-            try {
-                await queue.send(msg);
-                logger.info('Message sent to firehose queue');
-            } catch (error) {
-                logger.error('Error broadcasting to firehose queue:', error);
-                firehoseQueues.delete(queue);
-            }
-        }
-    });
-}
-
-async function syncSubscribeRepos(req, res) {
-    if (req.headers.upgrade !== 'websocket') {
-        return res.status(400).json({
-            error: "InvalidRequest",
-            message: "Expected WebSocket connection"
-        });
+// Helper function to concatenate Uint8Arrays (since JS doesn't have Python's += for bytes)
+function concatUint8Arrays(...arrays) {
+    const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const arr of arrays) {
+        result.set(arr, offset);
+        offset += arr.length;
     }
-
-    const ws = new WebSocket.Server({ noServer: true });
-    ws.handleUpgrade(req, req.socket, Buffer.alloc(0), (ws) => {
-        firehoseQueues.add(ws);
-        
-        ws.on('close', () => {
-            firehoseQueues.delete(ws);
-        });
-
-        ws.on('error', (error) => {
-            logger.error('WebSocket error:', error);
-            firehoseQueues.delete(ws);
-        });
-    });
+    return result;
 }
+
+// Example usage matching the expected input format
+async function example() {
+    try {
+        console.log('Running carfile.js example...');
+        
+        // Example CID (you would get this from your actual data)
+        const exampleCid = CID.parse('bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi');
+        
+        // Pre-serialized block data (as expected by the function)
+        const blockCidBytes = exampleCid.bytes;  // CID as bytes
+        const blockDataBytes = new TextEncoder().encode('example data');  // Your actual block data
+        
+        console.log('Block CID bytes length:', blockCidBytes.length);
+        console.log('Block data bytes length:', blockDataBytes.length);
+        
+        // Call serialise with exact same signature as Python
+        const roots = [exampleCid];  // List of CID objects (not pre-serialized)
+        const blocks = [
+            [blockCidBytes, blockDataBytes]  // Iterable of [cid_bytes, data_bytes] tuples
+        ];
+        
+        const serialized = serialise(roots, blocks);
+        console.log('Serialized bytes length:', serialized.length);
+        console.log('Hex:', Array.from(serialized).map(b => b.toString(16).padStart(2, '0')).join(''));
+        
+    } catch (error) {
+        console.error('Error in example:', error);
+    }
+}
+
+// Run the example when this file is executed
+example();
+
+export { varint_encode, serialise };
