@@ -11,6 +11,7 @@
   "dependencies": {
     "@atproto/api": "^0.3.0",
     "@ipld/dag-cbor": "^3.0.0",
+    "@noble/curves": "^1.2.0",
     "async-lock": "^1.4.0",
     "better-sqlite3": "^8.5.0",
     "buffer": "^6.0.3",
