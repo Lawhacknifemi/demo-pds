@@ -297,39 +297,32 @@ class Repo extends EventEmitter {
         const repo = new Repo(did, db, signingKey, tree);
         
         // Initialize database tables
-        repo.con.exec(`
-            -- Drop existing tables to ensure clean schema
-            DROP TABLE IF EXISTS blocks;
-            DROP TABLE IF EXISTS commits;
-            DROP TABLE IF EXISTS blobs;
-            DROP TABLE IF EXISTS repos;
-            DROP TABLE IF EXISTS records;
-
-            -- Create tables
-            CREATE TABLE blocks (
+        const statements = [
+            // Create tables if they don't exist
+            `CREATE TABLE IF NOT EXISTS blocks (
                 block_cid BLOB PRIMARY KEY NOT NULL,
                 block_value BLOB NOT NULL
-            );
+            )`,
 
-            CREATE TABLE commits (
+            `CREATE TABLE IF NOT EXISTS commits (
                 commit_seq INTEGER PRIMARY KEY NOT NULL,
                 commit_cid BLOB NOT NULL,
                 block_value BLOB NOT NULL
-            );
+            )`,
 
-            CREATE TABLE blobs (
+            `CREATE TABLE IF NOT EXISTS blobs (
                 blob_cid BLOB PRIMARY KEY NOT NULL,
                 blob_data BLOB NOT NULL,
                 blob_refcount INTEGER NOT NULL DEFAULT 0
-            );
+            )`,
 
-            CREATE TABLE repos (
+            `CREATE TABLE IF NOT EXISTS repos (
                 did TEXT PRIMARY KEY NOT NULL,
                 root TEXT NOT NULL,
                 rev TEXT NOT NULL
-            );
+            )`,
 
-            CREATE TABLE records (
+            `CREATE TABLE IF NOT EXISTS records (
                 rkey TEXT NOT NULL,
                 collection TEXT NOT NULL,
                 cid TEXT NOT NULL,
@@ -338,8 +331,13 @@ class Repo extends EventEmitter {
                 prev_cid TEXT,
                 data BLOB NOT NULL,
                 PRIMARY KEY (rkey, collection, repo)
-            );
-        `);
+            )`
+        ];
+
+        // Execute each statement
+        for (const statement of statements) {
+            repo.con.prepare(statement).run();
+        }
 
         // Create initial commit if needed
         const row = repo.con.prepare("SELECT * FROM commits WHERE commit_seq=0").get();
@@ -518,7 +516,7 @@ class Repo extends EventEmitter {
             this.con.prepare(`
                 INSERT INTO records (rkey, collection, cid, repo, commit_cid, prev_cid, data)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), recordBytes);
+            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), Buffer.from(recordBytes));
             
             // Update commits table
             const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
@@ -708,18 +706,38 @@ class Repo extends EventEmitter {
         });
     }
 
-    async getRecord(uri, cid) {
+    async getRecord(collection, rkey) {
         try {
             const record = this.con.prepare(
-                'SELECT * FROM records WHERE uri = ? AND (cid = ? OR ? IS NULL)'
-            ).get(uri, cid, cid);
+                'SELECT * FROM records WHERE collection = ? AND rkey = ?'
+            ).get(collection, rkey);
             if (!record) {
                 return null;
             }
+            console.log('Record from DB:', {
+                collection: record.collection,
+                rkey: record.rkey,
+                dataType: typeof record.data,
+                isBuffer: Buffer.isBuffer(record.data),
+                dataLength: record.data ? record.data.length : 0,
+                dataSample: record.data ? record.data.slice(0, 32) : null
+            });
+            
+            // Convert Buffer to Uint8Array for dagCbor.decode
+            const uint8Array = new Uint8Array(record.data);
+            console.log('Converted to Uint8Array:', {
+                type: uint8Array.constructor.name,
+                length: uint8Array.length,
+                sample: Array.from(uint8Array.slice(0, 32))
+            });
+            
+            const decodedValue = dagCbor.decode(uint8Array);
+            console.log('Decoded value:', decodedValue);
+            
             return {
-                uri,
+                uri: `at://${record.repo}/${record.collection}/${record.rkey}`,
                 cid: record.cid,
-                value: await this.getBlock(record.cid)
+                value: decodedValue
             };
         } catch (error) {
             logger.error('Error in getRecord:', error);
@@ -788,15 +806,9 @@ class Repo extends EventEmitter {
             }
 
             // Get all blocks from the database
-            const blocks = await new Promise((resolve, reject) => {
-                this.con.all(
-                    "SELECT block_cid, block_value FROM blocks",
-                    (err, rows) => {
-                        if (err) reject(err);
-                        resolve(rows);
-                    }
-                );
-            });
+            const blocks = this.con.prepare(
+                "SELECT block_cid, block_value FROM blocks"
+            ).all();
 
             // Convert blocks to the format needed for CAR serialization
             const carBlocks = blocks.map(row => [
@@ -852,10 +864,10 @@ class Repo extends EventEmitter {
 
     async getCommitPath(did, latest, earliest) {
         try {
-            const commits = await this.con.all(
-                'SELECT * FROM commits WHERE did = ? AND rev <= ? AND rev >= ? ORDER BY rev DESC',
-                [did, latest, earliest || 0]
-            );
+            const commits = this.con.prepare(
+                'SELECT * FROM commits WHERE did = ? AND rev <= ? AND rev >= ? ORDER BY rev DESC'
+            ).all(did, latest, earliest || 0);
+            
             if (!commits.length) {
                 return null;
             }
@@ -871,10 +883,10 @@ class Repo extends EventEmitter {
 
     async listRepos(limit = 50, cursor = null) {
         try {
-            const repos = await this.con.all(
-                'SELECT * FROM repos WHERE did > ? ORDER BY did LIMIT ?',
-                [cursor || '', limit]
-            );
+            const repos = this.con.prepare(
+                'SELECT * FROM repos WHERE did > ? ORDER BY did LIMIT ?'
+            ).all(cursor || '', limit);
+            
             return {
                 repos: repos.map(repo => ({
                     did: repo.did,

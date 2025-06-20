@@ -420,8 +420,8 @@ async function syncGetRepo(req, res) {
         // Set the proper content type for CAR files
         res.setHeader('Content-Type', 'application/vnd.ipld.car');
         
-        // Send the CAR file data
-        res.send(carData);
+        // Send the CAR file data as binary
+        res.end(carData);
     } catch (err) {
         logger.error('Error in syncGetRepo:', err);
         res.status(500).json({ 
@@ -467,8 +467,8 @@ async function syncGetCheckout(req, res) {
         // Set the proper content type for CAR files
         res.setHeader('Content-Type', 'application/vnd.ipld.car');
         
-        // Send the CAR file data
-        res.send(carData);
+        // Send the CAR file data as binary
+        res.end(carData);
     } catch (err) {
         logger.error('Error in syncGetCheckout:', err);
         res.status(500).json({ 
@@ -526,11 +526,17 @@ async function repoGetRecord(req, res) {
         const { collection, repo: repoDid, rkey } = req.query;
         
         if (repoDid === repo.did) {
-            const [uri, cid, value] = await repo.getRecord(collection, rkey);
+            const result = await repo.getRecord(collection, rkey);
+            if (!result) {
+                return res.status(404).json({ error: "NotFound", message: "Record not found" });
+            }
+            const { uri, cid, value } = result;
+            logger.info('repoGetRecord: value type', typeof value, Array.isArray(value), value && value.constructor && value.constructor.name);
+            logger.info('repoGetRecord: value (first 32 bytes)', value && value.slice ? value.slice(0, 32) : value);
             res.json({
                 uri,
                 cid: cid.toString(),
-                value: dagCbor.decode(value)
+                value: value  // Remove dagCbor.decode since value is already decoded
             });
         } else {
             const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.repo.getRecord?${new URLSearchParams(req.query)}`, {
