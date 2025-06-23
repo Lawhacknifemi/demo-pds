@@ -266,30 +266,14 @@ async function notifyAppviewServer(msg) {
 async function firehoseBroadcast(msg) {
     logger.info('Broadcasting firehose message to', firehoseQueues.size, 'clients');
     
-    try {
-        await firehoseQueuesLock.acquire('firehose', async () => {
-            // Ensure message is a Buffer
-            const messageBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
-            
-            for (const queue of firehoseQueues) {
-                try {
-                    if (queue.readyState === WebSocket.OPEN) {
-                        logger.debug('Sending message to WebSocket client');
-                        queue.send(messageBuffer, { binary: true });
-                        logger.info('Message sent to firehose queue successfully');
-                    } else {
-                        logger.warn('WebSocket not in OPEN state, removing from queues. State:', queue.readyState);
-                        firehoseQueues.delete(queue);
-                    }
-                } catch (error) {
-                    logger.error('Error broadcasting to firehose queue:', error);
-                    firehoseQueues.delete(queue);
-                }
+    await firehoseQueuesLock.acquire('firehose', async () => {
+        const messageBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(JSON.stringify(msg));
+        for (const queue of firehoseQueues) {
+            if (queue.readyState === WebSocket.OPEN) {
+                queue.send(messageBuffer);
             }
-        });
-    } catch (error) {
-        logger.error('Error acquiring firehose lock:', error);
-    }
+        }
+    });
 }
 
 // Route handlers
@@ -530,13 +514,13 @@ async function repoGetRecord(req, res) {
             if (!result) {
                 return res.status(404).json({ error: "NotFound", message: "Record not found" });
             }
-            const { uri, cid, value } = result;
+            const [uri, cid, value] = result;
             logger.info('repoGetRecord: value type', typeof value, Array.isArray(value), value && value.constructor && value.constructor.name);
             logger.info('repoGetRecord: value (first 32 bytes)', value && value.slice ? value.slice(0, 32) : value);
             res.json({
                 uri,
                 cid: cid.toString(),
-                value: value  // Remove dagCbor.decode since value is already decoded
+                value: dagCbor.decode(value)  // Decode the CBOR data
             });
         } else {
             const response = await fetch(`https://${config.APPVIEW_SERVER}/xrpc/com.atproto.repo.getRecord?${new URLSearchParams(req.query)}`, {

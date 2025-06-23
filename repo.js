@@ -4,7 +4,7 @@ import { sha256 } from 'multiformats/hashes/sha2';
 import { base32 } from 'multiformats/bases/base32';
 import Database from 'better-sqlite3';
 import { promisify } from 'util';
-import { MSTNode, MST } from './mst.js';
+import { MSTNode, MST, StrlenNode } from './mst.js';
 import { rawSign } from './signing.js';
 import { serialise } from './carfile.js';
 import { randomInt } from 'crypto';
@@ -101,69 +101,6 @@ function enumerateRecordCids(obj) {
     return cids;
 }
 
-class ATNode extends MSTNode {
-    /**
-     * @param {Array<ATNode|null>} subtrees
-     * @param {Array<string>} keys
-     * @param {Array<any>} vals
-     */
-    constructor(subtrees, keys, vals) {
-        super(subtrees, keys, vals);
-        // Define _cid as a writable property
-        Object.defineProperty(this, '_cid', {
-            value: null,
-            writable: true,
-            configurable: true
-        });
-    }
-
-    /**
-     * @param {string} key
-     * @returns {number}
-     */
-    static key_height(key) {
-        // Convert key to bytes
-        const keyBytes = Buffer.from(key);
-        
-        // Compute SHA-256 hash
-        const hash = crypto.createHash('sha256').update(keyBytes).digest();
-        
-        // Convert to bigint and count leading zero bits
-        const digest = BigInt('0x' + hash.toString('hex'));
-        const leadingZeroes = 256 - digest.toString(2).length;
-        
-        // Return half the number of leading zero bits
-        return Math.floor(leadingZeroes / 2);
-    }
-
-    /**
-     * @returns {ATNode}
-     */
-    static empty_root() {
-        return new this([null], [], []);
-    }
-
-    /**
-     * @param {string} key
-     * @returns {string}
-     */
-    keyPath() {
-        return this.key;
-    }
-
-    /**
-     * @yields {any}
-     */
-    *enumerateBlocks() {
-        yield this.value;
-        for (const child of this.subtrees) {
-            if (child) {
-                yield* child.enumerateBlocks();
-            }
-        }
-    }
-}
-
 // Add this helper function before the Repo class
 function cleanObject(obj) {
     if (obj === null || obj === undefined) {
@@ -184,100 +121,6 @@ function cleanObject(obj) {
     return cleaned;
 }
 
-// Add this before the Repo class
-async function firehoseBroadcast(message) {
-    try {
-        // Log the raw message first
-        logger.info('Raw firehose message:', {
-            type: message?.t,
-            op: message?.op,
-            hasOps: Array.isArray(message?.ops),
-            opsLength: message?.ops?.length,
-            hasBlocks: Array.isArray(message?.blocks),
-            blocksLength: message?.blocks?.length,
-            commit: message?.commit
-        });
-
-        // Ensure we have a valid message object
-        if (!message || typeof message !== 'object') {
-            logger.warn('Invalid message format in firehoseBroadcast');
-            return false;
-        }
-
-        // Validate and process blocks first
-        let processedBlocks = [];
-        if (Array.isArray(message.blocks)) {
-            for (const block of message.blocks) {
-                try {
-                    if (!Array.isArray(block) || block.length !== 2) {
-                        logger.warn('Invalid block format:', block);
-                        continue;
-                    }
-                    
-                    const [cid, data] = block;
-                    if (!cid || !data) {
-                        logger.warn('Missing cid or data in block:', block);
-                        continue;
-                    }
-
-                    // Ensure cid and data are Buffers
-                    const cidBuffer = Buffer.isBuffer(cid) ? cid : Buffer.from(cid);
-                    const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-                    
-                    processedBlocks.push([cidBuffer, dataBuffer]);
-                } catch (error) {
-                    logger.error('Error processing block:', error);
-                }
-            }
-        }
-
-        // Create a safe copy of the message with proper structure
-        const safeMessage = {
-            t: message.t || '#commit',
-            op: message.op || 1,
-            ops: Array.isArray(message.ops) ? message.ops.map(op => ({
-                action: op?.action || 'create',
-                path: op?.path || '',
-                cid: op?.cid || ''
-            })) : [],
-            seq: message.seq || Math.floor(Date.now() * 1000),
-            rev: message.rev || 0,
-            repo: message.repo || '',
-            time: message.time || new Date().toISOString().replace('.000Z', 'Z'),
-            blobs: Array.isArray(message.blobs) ? message.blobs : [],
-            blocks: processedBlocks,
-            commit: message.commit || ''
-        };
-
-        // Log the processed message structure
-        logger.info('Processed message structure:', {
-            type: safeMessage.t,
-            op: safeMessage.op,
-            hasOps: Array.isArray(safeMessage.ops),
-            opsLength: safeMessage.ops.length,
-            hasBlocks: Array.isArray(safeMessage.blocks),
-            blocksLength: safeMessage.blocks.length,
-            blocksFormat: safeMessage.blocks.map(block => ({
-                isArray: Array.isArray(block),
-                length: block.length,
-                cidType: block[0] ? 'Buffer' : 'undefined',
-                dataType: block[1] ? 'Buffer' : 'undefined',
-                cidLength: block[0]?.length || 0,
-                dataLength: block[1]?.length || 0
-            }))
-        });
-
-        // Log the full message
-        logger.info('Firehose broadcast:', JSON.stringify(safeMessage, null, 2));
-        return true;
-    } catch (error) {
-        logger.error('Error in firehoseBroadcast:', error);
-        logger.error('Error stack:', error.stack);
-        // Don't throw the error, just log it and continue
-        return false;
-    }
-}
-
 // Add this helper function before the Repo class
 function generateRkey() {
     const bytes = crypto.randomBytes(8);
@@ -290,7 +133,7 @@ class Repo extends EventEmitter {
         this.did = did;
         this.con = new Database(db);
         this.signingKey = signingKey;
-        this.tree = new MST(ATNode.empty_root());
+        this.tree = new MST(StrlenNode.emptyRoot());
     }
 
     static async initialize(did, db, signingKey, tree) {
@@ -344,8 +187,8 @@ class Repo extends EventEmitter {
         if (!row) {
             try {
                 // Get the root node's CID and serialised data
-                const rootCid = await repo.tree.root.getCid();
-                const rootSerialised = await repo.tree.root.getSerialised();
+                const rootCid = await repo.tree.getCid();
+                const rootSerialised = await repo.tree.getSerialised();
                 
                 const commit = cleanObject({
                     version: 3,
@@ -449,10 +292,13 @@ class Repo extends EventEmitter {
         }
         
         // Handle blob references
+        const referencedBlobs = new Set();
         if (record.blobs) {
             for (const blob of record.blobs) {
                 if (blob.ref) {
-                    blob.ref = CID.parse(blob.ref.$link);
+                    const blobCid = CID.parse(blob.ref.$link);
+                    referencedBlobs.add(blobCid);
+                    await this.increfBlob(blobCid);
                 }
             }
         }
@@ -495,22 +341,22 @@ class Repo extends EventEmitter {
         const signature = await rawSign(this.signingKey, commitBytes);
         commit.sig = signature;
         
+        // Prepare database block inserts
+        const dbBlockInserts = [
+            [Buffer.from(recordCid.bytes), recordBytes],
+            [Buffer.from(rootCid.bytes), rootSerialised],
+            [Buffer.from(commitCid.bytes), commitBytes]
+        ];
+        
         // Store blocks in database
         this.con.transaction(() => {
-            // Store record block
-            this.con.prepare(
+            // Store all blocks
+            const stmt = this.con.prepare(
                 "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
-            ).run(Buffer.from(recordCid.bytes), recordBytes);
-            
-            // Store root block
-            this.con.prepare(
-                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
-            ).run(Buffer.from(rootCid.bytes), rootSerialised);
-            
-            // Store commit block
-            this.con.prepare(
-                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
-            ).run(Buffer.from(commitCid.bytes), commitBytes);
+            );
+            for (const [cid, value] of dbBlockInserts) {
+                stmt.run(cid, value);
+            }
             
             // Update records table
             this.con.prepare(`
@@ -535,6 +381,9 @@ class Repo extends EventEmitter {
             op: 1
         });
 
+        // Generate CAR file bytes for blocks field
+        const carBytes = await serialise([commitCid], dbBlockInserts);
+
         const body = dagCbor.encode({
             ops: [{
                 cid: recordCid,
@@ -543,15 +392,12 @@ class Repo extends EventEmitter {
             }],
             seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
             rev: commit.rev,
-            since: latestCommit?.block_value?.rev || null,
+            since: latestCommit ? dagCbor.decode(latestCommit.block_value).rev : null,
             prev: null,
             repo: this.did,
             time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
-            blobs: [],
-            blocks: [commitCid, recordCid, rootCid].map(cid => ({
-                cid: cid.toString(),
-                bytes: Buffer.from(cid.bytes).toString('base64')
-            })),
+            blobs: Array.from(referencedBlobs).map(cid => cid.toString()),
+            blocks: carBytes, // Raw CAR file bytes
             commit: commitCid.toString(),
             rebase: false,
             tooBig: false
@@ -579,12 +425,12 @@ class Repo extends EventEmitter {
                 await this.decrefBlob(blob);
             }
             
-            const dbBlockInserts = [];
-            const newBlocks = new Set();
-            this.tree.delete(recordKey, newBlocks);
-            for (const block of newBlocks) {
-                dbBlockInserts.push([Buffer.from(block.cid.bytes), block.serialised]);
-            }
+            // Update MST
+            this.tree = await this.tree.delete(recordKey);
+            
+            // Get the root CID and serialized data
+            const rootCid = await this.tree.getCid();
+            const rootSerialised = await this.tree.getSerialised();
             
             // Get previous commit
             const prevCommit = this.con.prepare(
@@ -597,7 +443,7 @@ class Repo extends EventEmitter {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: this.tree.cid.toString(),
+                data: rootCid.toString(),
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
@@ -605,12 +451,20 @@ class Repo extends EventEmitter {
             
             // Sign the commit
             const commitBytes = dagCbor.encode(commit);
+            const commitCid = await hashToCid(commitBytes);
             const commitSig = await rawSign(this.signingKey, commitBytes);
             commit.sig = commitSig;
             
             const commitBlob = dagCbor.encode(commit);
-            const commitCid = await hashToCid(commitBlob);
-            dbBlockInserts.push([Buffer.from(commitCid.bytes), commitBlob]);
+            
+            // Prepare database block inserts
+            const dbBlockInserts = [
+                [Buffer.from(rootCid.bytes), rootSerialised],
+                [Buffer.from(commitCid.bytes), commitBlob]
+            ];
+            
+            // Generate CAR file bytes for blocks field
+            const carBytes = await serialise([commitCid], dbBlockInserts);
             
             // Create firehose message
             const firehoseBlob = Buffer.concat([
@@ -631,7 +485,7 @@ class Repo extends EventEmitter {
                     repo: this.did,
                     time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
                     blobs: [],
-                    blocks: await serialise([commitCid], dbBlockInserts),
+                    blocks: carBytes, // Raw CAR file bytes
                     commit: commitCid.toString(),
                     rebase: false,
                     tooBig: false
@@ -639,31 +493,22 @@ class Repo extends EventEmitter {
             ]);
             
             // Insert blocks into database
-            await new Promise((resolve, reject) => {
-                this.con.transaction(() => {
-                    const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
-                    for (const [cid, value] of dbBlockInserts) {
-                        stmt.run([cid, value]);
-                    }
-                    
-                    // Delete record
-                    this.con.run("DELETE FROM records WHERE record_key = ?", [recordKey]);
-                    
-                    // Get the next commit sequence number
-                    const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
-                    const nextSeq = (row?.max_seq ?? -1) + 1;
-                    
-                    // Insert commit with the next sequence number
-                    this.con.run("INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)", 
-                        [nextSeq, Buffer.from(commitCid.bytes)], (err) => {
-                            if (err) {
-                                reject(err);
-                                return;
-                            }
-                            resolve();
-                        });
-                });
-            });
+            this.con.transaction(() => {
+                const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
+                for (const [cid, value] of dbBlockInserts) {
+                    stmt.run(cid, value);
+                }
+                
+                // Delete record
+                this.con.prepare("DELETE FROM records WHERE rkey = ? AND collection = ?").run(rkey, collection);
+                
+                // Get the next commit sequence number
+                const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+                const nextSeq = (row?.max_seq ?? -1) + 1;
+                
+                // Insert commit with the next sequence number
+                this.con.prepare("INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)").run(nextSeq, Buffer.from(commitCid.bytes), commitBlob);
+            })();
             
             return firehoseBlob;
         } catch (err) {
@@ -673,37 +518,19 @@ class Repo extends EventEmitter {
     }
 
     async increfBlob(cid) {
-        return new Promise((resolve, reject) => {
-            this.con.run(
-                "UPDATE blobs SET blob_refcount = blob_refcount + 1 WHERE blob_cid = ?",
-                [cid.toString()],
-                (err) => {
-                    if (err) reject(err);
-                    resolve();
-                }
-            );
-        });
+        this.con.prepare(
+            "UPDATE blobs SET blob_refcount = blob_refcount + 1 WHERE blob_cid = ?"
+        ).run(cid.toString());
     }
 
     async decrefBlob(cid) {
-        return new Promise((resolve, reject) => {
-            this.con.run(
-                "UPDATE blobs SET blob_refcount = blob_refcount - 1 WHERE blob_cid = ?",
-                [cid.toString()],
-                (err) => {
-                    if (err) reject(err);
-                    resolve();
-                }
-            );
-            this.con.run(
-                "DELETE FROM blobs WHERE blob_cid = ? AND blob_refcount < 1",
-                [cid.toString()],
-                (err) => {
-                    if (err) reject(err);
-                    resolve();
-                }
-            );
-        });
+        this.con.prepare(
+            "UPDATE blobs SET blob_refcount = blob_refcount - 1 WHERE blob_cid = ?"
+        ).run(cid.toString());
+        
+        this.con.prepare(
+            "DELETE FROM blobs WHERE blob_cid = ? AND blob_refcount < 1"
+        ).run(cid.toString());
     }
 
     async getRecord(collection, rkey) {
@@ -712,7 +539,7 @@ class Repo extends EventEmitter {
                 'SELECT * FROM records WHERE collection = ? AND rkey = ?'
             ).get(collection, rkey);
             if (!record) {
-                return null;
+                throw new Error("record not found");
             }
             console.log('Record from DB:', {
                 collection: record.collection,
@@ -734,11 +561,11 @@ class Repo extends EventEmitter {
             const decodedValue = dagCbor.decode(uint8Array);
             console.log('Decoded value:', decodedValue);
             
-            return {
-                uri: `at://${record.repo}/${record.collection}/${record.rkey}`,
-                cid: record.cid,
-                value: decodedValue
-            };
+            return [
+                `at://${record.repo}/${record.collection}/${record.rkey}`,
+                CID.parse(record.cid),
+                record.data
+            ];
         } catch (error) {
             logger.error('Error in getRecord:', error);
             throw error;
@@ -753,35 +580,23 @@ class Repo extends EventEmitter {
     }
 
     async putPreferences(blob) {
-        return new Promise((resolve, reject) => {
-            this.con.run(
-                "INSERT OR REPLACE INTO preferences (preferences_did, preferences_blob) VALUES (?, ?)",
-                [this.did, blob],
-                (err) => {
-                    if (err) reject(err);
-                    resolve();
-                }
-            );
-        });
+        this.con.prepare(
+            "INSERT OR REPLACE INTO preferences (preferences_did, preferences_blob) VALUES (?, ?)"
+        ).run(this.did, blob);
     }
 
     async putBlob(data) {
         const cid = await hashToCid(data);
         
-        return new Promise((resolve, reject) => {
-            this.con.run(
-                "INSERT OR IGNORE INTO blobs (blob_cid, blob_data, blob_refcount) VALUES (?, ?, 0)",
-                [cid.toString(), data],
-                (err) => {
-                    if (err) reject(err);
-                    resolve({
-                        ref: cid.toString(),
-                        size: data.length,
-                        mimeType: 'application/octet-stream'
-                    });
-                }
-            );
-        });
+        this.con.prepare(
+            "INSERT OR IGNORE INTO blobs (blob_cid, blob_data, blob_refcount) VALUES (?, ?, 0)"
+        ).run(cid.toString(), data);
+        
+        return {
+            ref: cid.toString(),
+            size: data.length,
+            mimeType: 'application/octet-stream'
+        };
     }
 
     async getBlob(cid) {
@@ -928,44 +743,67 @@ class Repo extends EventEmitter {
         }
     }
 
-    async createCommit(recordKey, recordCid) {
-        logger.info('Creating commit for record:', recordKey);
+    async createCommit(collection, rkey, valueCid, referencedBlobs, dbBlockInserts) {
+        logger.info('Creating commit for record:', rkey);
+
+        const latestCommitStmt = this.con.prepare(`
+            SELECT c.commit_seq, b.block_value
+            FROM commits c
+            JOIN blocks b ON c.commit_cid = b.block_cid
+            ORDER BY c.commit_seq DESC
+            LIMIT 1
+        `);
+        const latestCommitResult = latestCommitStmt.get();
+        const prevCommitSeq = latestCommitResult.commit_seq;
+        const prevCommit = dagCbor.decode(latestCommitResult.block_value);
         
-        try {
-            // Get the latest commit
-            const latestCommit = this.con.prepare(
-                "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1"
-            ).get();
+        const newCommitRev = tidNow();
+        const commit = {
+            version: 3,
+            data: this.tree.cid,
+            rev: newCommitRev,
+            prev: prevCommit.cid,
+            did: this.did
+        };
+        commit.sig = await this.signCommit(commit);
+        const commitBlob = dagCbor.encode(commit);
+        const commitCid = await hashToCid(commitBlob);
+        dbBlockInserts.push([commitCid.bytes, commitBlob]);
 
-            // Ensure tree is initialized
-            if (!this.tree || !this.tree.root) {
-                logger.error('Tree not properly initialized');
-                throw new Error('Tree not properly initialized');
-            }
+        const recordKey = `${collection}/${rkey}`;
+        const uri = `at://${this.did}/${recordKey}`;
 
-            // Get the tree CID
-            const treeCid = await this.tree.getCid();
-            if (!treeCid) {
-                logger.error('Tree CID not available');
-                throw new Error('Tree CID not available');
-            }
+        // CONSTRUCT FIREHOSE MESSAGE LIKE PYTHON
+        const ops = [{ action: 'create', cid: valueCid, path: recordKey }];
+        const header = { t: '#commit', op: 1 };
+        const body = {
+            ops: ops,
+            seq: Math.floor(Date.now() * 1000000),
+            rev: newCommitRev,
+            since: prevCommit.rev,
+            repo: this.did,
+            time: timestampStrNow(),
+            blobs: Array.from(referencedBlobs).map(cid => cid.bytes),
+            blocks: await serialise([this.tree.cid, commitCid], dbBlockInserts),
+            commit: commitCid,
+            rebase: false,
+            tooBig: false,
+        };
 
-            // Create new commit
-            const newCommitRev = tidNow();
-            const commit = cleanObject({
-                version: 3,
-                data: treeCid.toString(),
-                rev: newCommitRev,
-                prev: latestCommit ? latestCommit.block_value : null,
-                did: this.did
-            });
-
-            logger.info('Created commit object:', commit);
-            return commit;
-        } catch (error) {
-            logger.error('Error in createCommit:', error);
-            throw error;
+        const firehoseMsg = Buffer.concat([
+            dagCbor.encode(header),
+            dagCbor.encode(body)
+        ]);
+        
+        // Database updates
+        this.con.prepare('INSERT OR IGNORE INTO records (record_key, record_cid) VALUES (?, ?)').run(recordKey, valueCid.bytes);
+        const stmt = this.con.prepare('INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)');
+        for (const block of dbBlockInserts) {
+            stmt.run(block[0], block[1]);
         }
+        this.con.prepare('INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)').run(prevCommitSeq + 1, commitCid.bytes);
+
+        return { firehoseMsg, uri, cid: valueCid };
     }
 
     async signCommit(commit) {
@@ -986,4 +824,4 @@ class Repo extends EventEmitter {
 }
 
 // Export the Repo class and other required exports
-export { Repo, ATNode, tidNow, hashToCid, dtToStr, timestampStrNow }; 
+export { Repo, tidNow, hashToCid, dtToStr, timestampStrNow }; 
