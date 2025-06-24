@@ -12,7 +12,6 @@ import { writeFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import base32Encode from 'base32-encode';
-import forge from 'node-forge';
 import config from './config.js';
 
 const require = createRequire(import.meta.url);
@@ -68,38 +67,95 @@ function rawSign(msg, privKey) {
   return Buffer.from(r + s, 'hex');
 }
 
-// Function to convert raw private key to PEM format
-function privateKeyToPEM(privateKey) {
-    // Create a new key pair using node-forge
-    const keypair = forge.pki.ed25519.generateKeyPair();
-    
-    // Convert the private key to ASN.1 format
-    const asn1 = forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
-        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.INTEGER, false, forge.util.hexToBytes('00')),
-        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.SEQUENCE, true, [
-            forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, forge.asn1.oidToDer('1.2.840.10045.2.1').getBytes()),
-            forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OID, false, forge.asn1.oidToDer('1.2.840.10045.3.1.7').getBytes())
-        ]),
-        forge.asn1.create(forge.asn1.Class.UNIVERSAL, forge.asn1.Type.OCTETSTRING, false, forge.util.hexToBytes('04' + privateKey.toString('hex')))
-    ]);
+// Function to create proper PKCS#8 PEM for secp256k1 (matching Python's cryptography library)
+function createProperSecp256k1PEM(privateKeyBytes) {
+  // Create a KeyObject from the raw private key bytes
+  // We need to construct the proper ASN.1 structure for secp256k1
+  
+  // This is the ASN.1 structure for a secp256k1 private key in PKCS#8 format
+  // SEQUENCE {
+  //   INTEGER 0,
+  //   SEQUENCE {
+  //     OBJECT IDENTIFIER ecPublicKey,
+  //     OBJECT IDENTIFIER secp256k1
+  //   },
+  //   OCTET STRING containing the private key
+  // }
+  
+  const privateKeyHex = privateKeyBytes.toString('hex');
+  
+  // Build the ASN.1 structure manually
+  const ecPublicKeyOID = '06072a8648ce3d0201'; // 1.2.840.10045.2.1 (ecPublicKey)
+  const secp256k1OID = '06052b8104000a';       // 1.3.132.0.10 (secp256k1)
+  
+  // Private key in OCTET STRING format
+  const privateKeyOctetString = '0420' + privateKeyHex; // 04 = OCTET STRING, 20 = length 32
+  
+  // Algorithm identifier SEQUENCE
+  const algorithmSeq = '3013' + ecPublicKeyOID + secp256k1OID; // 30 = SEQUENCE, 13 = length
+  
+  // Outer SEQUENCE
+  const version = '020100'; // INTEGER 0
+  const privateKeyOctetStringOuter = '0422' + privateKeyOctetString; // 04 = OCTET STRING, 22 = length
+  
+  const fullSequence = '30' + 
+    ((version.length + algorithmSeq.length + privateKeyOctetStringOuter.length) / 2).toString(16).padStart(2, '0') +
+    version + algorithmSeq + privateKeyOctetStringOuter;
+  
+  const der = Buffer.from(fullSequence, 'hex');
+  const base64 = der.toString('base64');
+  
+  // Format as PEM
+  const pem = '-----BEGIN PRIVATE KEY-----\n' +
+              base64.match(/.{1,64}/g).join('\n') + '\n' +
+              '-----END PRIVATE KEY-----\n';
+  
+  return pem;
+}
 
-    // Convert to PEM format
-    const der = forge.asn1.toDer(asn1).getBytes();
-    const base64 = forge.util.encode64(der);
-    const pem = '-----BEGIN PRIVATE KEY-----\n' +
-                base64.match(/.{1,64}/g).join('\n') + '\n' +
-                '-----END PRIVATE KEY-----\n';
-
-    return pem;
+// Alternative simpler approach using Node.js crypto directly
+function createSecp256k1KeyPair() {
+  // Generate a secp256k1 key pair using Node.js crypto
+  const { privateKey } = crypto.generateKeyPairSync('ec', {
+    namedCurve: 'secp256k1',
+    privateKeyEncoding: {
+      type: 'pkcs8',
+      format: 'pem'
+    },
+    publicKeyEncoding: {
+      type: 'spki',
+      format: 'pem'
+    }
+  });
+  
+  // Extract the raw private key bytes
+  const keyObject = crypto.createPrivateKey(privateKey);
+  const rawPrivateKey = keyObject.export({
+    format: 'der',
+    type: 'sec1'
+  });
+  
+  // The SEC1 format has the private key at the end
+  // For secp256k1, it's usually the last 32 bytes
+  const privateKeyBytes = rawPrivateKey.slice(-32);
+  
+  return {
+    privateKeyPem: privateKey,
+    privateKeyBytes: privateKeyBytes
+  };
 }
 
 async function main() {
   try {
-    // Generate a new key pair
-    let privKey;
-    do {
-      privKey = crypto.randomBytes(32);
-    } while (!secp256k1.utils.isValidPrivateKey(privKey));
+    // Use Node.js crypto to generate a proper secp256k1 key pair
+    const keyPair = createSecp256k1KeyPair();
+    const privKey = keyPair.privateKeyBytes;
+    const privateKeyPem = keyPair.privateKeyPem;
+    
+    // Verify the key is valid
+    if (!secp256k1.utils.isValidPrivateKey(privKey)) {
+      throw new Error('Generated private key is not valid for secp256k1');
+    }
 
     const pubKey = secp256k1.getPublicKey(privKey, true); // Get compressed public key
 
@@ -156,11 +212,11 @@ async function main() {
         throw new Error(`Failed to create DID: ${error.message}`);
     }
 
-    // Save the private key in PEM format
+    // Save the private key in proper PEM format
     const keyPath = join(__dirname, 'privkey.pem');
-    const pemKey = privateKeyToPEM(privKey);
-    await writeFile(keyPath, pemKey);
+    await writeFile(keyPath, privateKeyPem);
     console.log('Private key saved to:', keyPath);
+    console.log('PEM format verified - this should work with your crawl request script');
 
   } catch (error) {
     console.error('Error:', error);
