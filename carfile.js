@@ -8,7 +8,7 @@ function varint_encode(n) {
     const result = [];
     while (n) {
         const x = n % 128;
-        n = Math.floor(n / 128);
+        n = Math.floor(n / 128); 
         result.push(x | ((n !== 0) << 7));
     }
     return new Uint8Array(result);

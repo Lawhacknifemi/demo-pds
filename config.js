@@ -4,7 +4,7 @@ const APPVIEW_SERVER = "public.api.bsky.app";
 const BGS_SERVER = "bsky.network";
 
 // Instance-specific Configuration
-const HANDLE = "jpdshandle.memory-design.xyz";
+const HANDLE = "jpdshandle.jpd.memory-design.xyz";
 const PDS_SERVER = "jpd.memory-design.xyz";
 const DID_PLC = "did:plc:vivxcst4i7bangp7no3kxcv5";
 

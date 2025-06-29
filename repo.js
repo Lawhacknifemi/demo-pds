@@ -327,13 +327,14 @@ class Repo extends EventEmitter {
         ).get();
         
         // Create new commit
-        const commit = cleanObject({
+        const newCommitRev = tidNow();
+        const commit = {
             version: 3,
-            data: rootCid.toString(),
-            rev: tidNow(),
+            data: (await this.tree.getCid()).toString(),
+            rev: newCommitRev,
             prev: latestCommit ? latestCommit.block_value : null,
             did: this.did
-        });
+        };
         
         // Sign the commit
         const commitBytes = dagCbor.encode(commit);
@@ -381,30 +382,34 @@ class Repo extends EventEmitter {
             op: 1
         });
 
-        // Generate CAR file bytes for blocks field
-        const carBytes = await serialise([commitCid], dbBlockInserts);
+        // Include ALL new blocks in the firehose message (like Python does)
+        const firehoseBlockInserts = [
+            [Buffer.from(recordCid.bytes), recordBytes],
+            [Buffer.from(rootCid.bytes), rootSerialised],
+            [Buffer.from(commitCid.bytes), commitBytes]
+        ];
 
-        const body = dagCbor.encode({
+        const body = {
             ops: [{
                 cid: recordCid,
                 path: fullKey,
                 action: "create"
             }],
-            seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
+            seq: Math.floor(Date.now() * 1000000),
             rev: commit.rev,
             since: latestCommit ? dagCbor.decode(latestCommit.block_value).rev : null,
             prev: null,
             repo: this.did,
-            time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
-            blobs: Array.from(referencedBlobs).map(cid => cid.toString()),
-            blocks: carBytes, // Raw CAR file bytes
-            commit: commitCid.toString(),
+            time: new Date().toISOString().replace('.000Z', 'Z'),
+            blobs: Array.from(referencedBlobs).map(cid => cid.bytes),
+            blocks: await serialise([commitCid], firehoseBlockInserts),
+            commit: commitCid,
             rebase: false,
             tooBig: false
-        });
+        };
 
         // Concatenate the two parts like Python does
-        const firehoseMsg = Buffer.concat([header, body]);
+        const firehoseMsg = Buffer.concat([header, dagCbor.encode(body)]);
         
         return {
             uri: `at://${repo}/${collection}/${recordKey}`,
@@ -478,14 +483,14 @@ class Repo extends EventEmitter {
                         path: recordKey,
                         action: "delete"
                     }],
-                    seq: Math.floor(Date.now() * 1000000), // Use microseconds like Python
+                    seq: Math.floor(Date.now() * 1000000),
                     rev: newCommitRev,
                     since: prevCommitData.rev,
                     prev: prevCommitData.prev || null,
                     repo: this.did,
-                    time: new Date().toISOString().replace('.000Z', 'Z'), // Match Python's format
+                    time: new Date().toISOString().replace('.000Z', 'Z'),
                     blobs: [],
-                    blocks: carBytes, // Raw CAR file bytes
+                    blocks: carBytes,
                     commit: commitCid.toString(),
                     rebase: false,
                     tooBig: false
@@ -760,15 +765,15 @@ class Repo extends EventEmitter {
         const newCommitRev = tidNow();
         const commit = {
             version: 3,
-            data: this.tree.cid,
+            data: (await this.tree.getCid()).toString(),
             rev: newCommitRev,
             prev: prevCommit.cid,
             did: this.did
         };
         commit.sig = await this.signCommit(commit);
-        const commitBlob = dagCbor.encode(commit);
-        const commitCid = await hashToCid(commitBlob);
-        dbBlockInserts.push([commitCid.bytes, commitBlob]);
+        const commitBytes = dagCbor.encode(commit);
+        const commitCid = await hashToCid(commitBytes);
+        dbBlockInserts.push([commitCid.bytes, commitBytes]);
 
         const recordKey = `${collection}/${rkey}`;
         const uri = `at://${this.did}/${recordKey}`;
@@ -776,6 +781,10 @@ class Repo extends EventEmitter {
         // CONSTRUCT FIREHOSE MESSAGE LIKE PYTHON
         const ops = [{ action: 'create', cid: valueCid, path: recordKey }];
         const header = { t: '#commit', op: 1 };
+        
+        // Only serialize the commit block for the firehose message
+        const commitBlockInserts = [[commitCid.bytes, commitBytes]];
+        
         const body = {
             ops: ops,
             seq: Math.floor(Date.now() * 1000000),
@@ -784,7 +793,7 @@ class Repo extends EventEmitter {
             repo: this.did,
             time: timestampStrNow(),
             blobs: Array.from(referencedBlobs).map(cid => cid.bytes),
-            blocks: await serialise([this.tree.cid, commitCid], dbBlockInserts),
+            blocks: await serialise([commitCid], commitBlockInserts),
             commit: commitCid,
             rebase: false,
             tooBig: false,

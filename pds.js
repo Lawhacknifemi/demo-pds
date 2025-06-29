@@ -265,12 +265,11 @@ async function notifyAppviewServer(msg) {
 
 async function firehoseBroadcast(msg) {
     logger.info('Broadcasting firehose message to', firehoseQueues.size, 'clients');
-    
     await firehoseQueuesLock.acquire('firehose', async () => {
         const messageBuffer = Buffer.isBuffer(msg) ? msg : Buffer.from(JSON.stringify(msg));
-        for (const queue of firehoseQueues) {
-            if (queue.readyState === WebSocket.OPEN) {
-                queue.send(messageBuffer);
+        for (const ws of firehoseQueues) {
+            if (ws.readyState === WebSocket.OPEN && ws.firehoseQueue) {
+                ws.firehoseQueue.push(messageBuffer);
             }
         }
     });
@@ -282,7 +281,14 @@ async function hello(req, res) {
 }
 
 async function serverDescribeServer(req, res) {
-    res.json({ availableUserDomains: [] });
+    res.json({
+        availableUserDomains: ["jpd.memory-design.xyz"],
+        inviteCodeRequired: false,
+        links: {
+            privacyPolicy: "https://jpd.memory-design.xyz/privacy",
+            termsOfService: "https://jpd.memory-design.xyz/terms"
+        }
+    });
 }
 
 async function serverCreateSession(req, res) {
@@ -602,24 +608,44 @@ const wss = new WebSocketServer({ noServer: true });
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
     logger.info('New WebSocket connection established');
+
+    // Create a queue for this client
+    const queue = [];
+    let isAlive = true;
+
+    // Add to global set
     firehoseQueues.add(ws);
-    
-    // Send test message
-    try {
-        const testMsg = Buffer.from('Test connection message');
-        ws.send(testMsg);
-        logger.info('Test message sent to new client');
-    } catch (error) {
-        logger.error('Error sending test message:', error);
+
+    // Function to send messages from the queue
+    async function sendFromQueue() {
+        while (isAlive) {
+            if (queue.length > 0 && ws.readyState === ws.OPEN) {
+                const msg = queue.shift();
+                try {
+                    ws.send(msg);
+                } catch (err) {
+                    logger.error('Error sending firehose message:', err);
+                }
+            }
+            await new Promise(resolve => setTimeout(resolve, 10)); // avoid busy loop
+        }
     }
+
+    // Start sending messages from the queue
+    sendFromQueue();
+
+    // Attach the queue to the ws object for easy access
+    ws.firehoseQueue = queue;
 
     ws.on('close', () => {
         logger.info('WebSocket connection closed');
+        isAlive = false;
         firehoseQueues.delete(ws);
     });
 
     ws.on('error', (error) => {
         logger.error('WebSocket error:', error);
+        isAlive = false;
         firehoseQueues.delete(ws);
     });
 
