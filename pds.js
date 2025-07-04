@@ -291,6 +291,40 @@ async function serverDescribeServer(req, res) {
     });
 }
 
+async function syncGetRepoStatus(req, res) {
+    try {
+        const { did } = req.query;
+        if (!did) {
+            return res.status(400).json({
+                error: "InvalidRequest",
+                message: "Missing did parameter"
+            });
+        }
+
+        // Only support your own DID for now
+        if (did !== config.DID_PLC) {
+            return res.status(404).json({
+                error: "NotFound",
+                message: "Repo not found"
+            });
+        }
+
+        // You may want to fetch this info from your repo object if available
+        // Here is a minimal example:
+        res.json({
+            did: config.DID_PLC,
+            handle: config.HANDLE, // or whatever handle you use
+            service: `https://${config.PDS_SERVER}`,
+            status: "active", // or "inactive", "takendown", etc.
+            type: "repo"
+            // You can add more fields as needed per the atproto spec
+        });
+    } catch (err) {
+        res.status(500).json({ error: "InternalError", message: err.message });
+    }
+}
+
+
 async function serverCreateSession(req, res) {
     try {
         const { identifier, password } = req.body;
@@ -388,6 +422,12 @@ async function syncSubscribeRepos(req, res) {
 }
 
 async function syncGetRepo(req, res) {
+    console.log(
+      '[syncGetRepo] Request from',
+      req.ip,
+      '| user-agent:', req.headers['user-agent'],
+      '| time:', new Date().toISOString()
+    );
     try {
         const { did } = req.query;
         if (!did) {
@@ -678,6 +718,7 @@ async function initServer() {
         app.get('/', hello);
         app.get('/.well-known/atproto-did', (req, res) => res.send(config.DID_PLC));
         app.get('/xrpc/com.atproto.server.describeServer', serverDescribeServer);
+        app.get('/xrpc/com.atproto.sync.getRepoStatus', syncGetRepoStatus);
         app.post('/xrpc/com.atproto.server.createSession', serverCreateSession);
         app.get('/xrpc/com.atproto.server.getSession', authenticated(serverGetSession));
         app.get('/xrpc/com.atproto.identity.resolveHandle', identityResolveHandle);

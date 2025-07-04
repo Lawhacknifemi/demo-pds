@@ -389,6 +389,13 @@ class Repo extends EventEmitter {
             [Buffer.from(commitCid.bytes), commitBytes]
         ];
 
+        // Get previous commit for prevData
+        const prevCommit = this.con.prepare(
+            "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+        ).get();
+        
+        const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
+
         const body = {
             ops: [{
                 cid: recordCid,
@@ -405,7 +412,8 @@ class Repo extends EventEmitter {
             blocks: await serialise([commitCid], firehoseBlockInserts),
             commit: commitCid,
             rebase: false,
-            tooBig: false
+            tooBig: false,
+            prevData: prevCommitData ? CID.parse(prevCommitData.data) : null
         };
 
         // Concatenate the two parts like Python does
@@ -439,7 +447,7 @@ class Repo extends EventEmitter {
             
             // Get previous commit
             const prevCommit = this.con.prepare(
-                "SELECT commit_seq, block_value FROM commits INNER JOIN blocks ON block_cid=commit_cid ORDER BY commit_seq DESC LIMIT 1"
+                "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
             ).get();
             
             const prevCommitData = dagCbor.decode(prevCommit.block_value);
@@ -481,7 +489,8 @@ class Repo extends EventEmitter {
                     ops: [{
                         cid: null,
                         path: recordKey,
-                        action: "delete"
+                        action: "delete",
+                        prev: existingCid
                     }],
                     seq: Math.floor(Date.now() * 1000000),
                     rev: newCommitRev,
@@ -493,7 +502,8 @@ class Repo extends EventEmitter {
                     blocks: carBytes,
                     commit: commitCid.toString(),
                     rebase: false,
-                    tooBig: false
+                    tooBig: false,
+                    prevData: prevCommitData ? CID.parse(prevCommitData.data) : null
                 })
             ]);
             
