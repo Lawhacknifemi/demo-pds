@@ -337,10 +337,12 @@ class Repo extends EventEmitter {
         };
         
         // Sign the commit
+        const signature = await rawSign(this.signingKey, dagCbor.encode(commit));
+        commit.sig = signature;
+        
+        // Encode the signed commit
         const commitBytes = dagCbor.encode(commit);
         const commitCid = await hashToCid(commitBytes);
-        const signature = await rawSign(this.signingKey, commitBytes);
-        commit.sig = signature;
         
         // Prepare database block inserts
         const dbBlockInserts = [
@@ -465,10 +467,12 @@ class Repo extends EventEmitter {
             });
             
             // Sign the commit
+            const commitSig = await rawSign(this.signingKey, dagCbor.encode(commit));
+            commit.sig = commitSig;
+            
+            // Encode the signed commit
             const commitBytes = dagCbor.encode(commit);
             const commitCid = await hashToCid(commitBytes);
-            const commitSig = await rawSign(this.signingKey, commitBytes);
-            commit.sig = commitSig;
             
             const commitBlob = dagCbor.encode(commit);
             
@@ -774,15 +778,29 @@ class Repo extends EventEmitter {
         const prevCommitSeq = latestCommitResult.commit_seq;
         const prevCommit = dagCbor.decode(latestCommitResult.block_value);
         
+        // Get the previous commit CID as a CID object
+        const prevCommitCid = CID.decode(new Uint8Array(prevCommit.cid));
+        
         const newCommitRev = tidNow();
-        const commit = {
+        
+        // Create unsigned commit first (without signature)
+        const unsignedCommit = {
             version: 3,
             data: (await this.tree.getCid()).toString(),
             rev: newCommitRev,
-            prev: prevCommit.cid,
+            prev: prevCommitCid,
             did: this.did
         };
-        commit.sig = await this.signCommit(commit);
+        
+        // Sign the unsigned commit
+        const signature = await this.signCommit(unsignedCommit);
+        
+        // Create the final commit with signature
+        const commit = {
+            ...unsignedCommit,
+            sig: signature
+        };
+        
         const commitBytes = dagCbor.encode(commit);
         const commitCid = await hashToCid(commitBytes);
         dbBlockInserts.push([commitCid.bytes, commitBytes]);
@@ -830,17 +848,23 @@ class Repo extends EventEmitter {
     async signCommit(commit) {
         logger.info('Signing commit');
         
-        // Encode the commit
-        const commitBytes = dagCbor.encode(commit);
+        // Create a copy of the commit without the signature field
+        const unsignedCommit = {
+            version: commit.version,
+            data: commit.data,
+            rev: commit.rev,
+            prev: commit.prev,
+            did: commit.did
+        };
         
-        // Sign the commit
-        const commitSig = await rawSign(this.signingKey, commitBytes);
+        // Encode the unsigned commit
+        const unsignedCommitBytes = dagCbor.encode(unsignedCommit);
         
-        // Add signature to commit
-        commit.sig = commitSig;
+        // Sign the unsigned commit bytes
+        const commitSig = await rawSign(this.signingKey, unsignedCommitBytes);
         
         logger.info('Commit signed successfully');
-        return commit;
+        return commitSig;
     }
 }
 
