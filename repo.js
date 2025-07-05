@@ -330,7 +330,7 @@ class Repo extends EventEmitter {
         const newCommitRev = tidNow();
         const commit = {
             version: 3,
-            data: (await this.tree.getCid()).toString(),
+            data: await this.tree.getCid(),  // Use CID object, not string
             rev: newCommitRev,
             prev: latestCommit ? latestCommit.block_value : null,
             did: this.did
@@ -348,11 +348,11 @@ class Repo extends EventEmitter {
             [Buffer.from(rootCid.bytes), rootSerialised],
             [Buffer.from(commitCid.bytes), commitBytes]
         ];
-       
-            // Calculate next sequence number before transaction
+        
+        // Calculate next sequence number before transaction
         const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
         const nextSeq = (row?.max_seq ?? -1) + 1;
-            
+        
         // Store blocks in database
         this.con.transaction(() => {
             // Store all blocks
@@ -370,8 +370,6 @@ class Repo extends EventEmitter {
             `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), Buffer.from(recordBytes));
             
             // Update commits table
-            // const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
-            // const nextSeq = (row?.max_seq ?? -1) + 1;
             this.con.prepare(
                 "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
             ).run(nextSeq, Buffer.from(commitCid.bytes), commitBytes);
@@ -388,9 +386,9 @@ class Repo extends EventEmitter {
 
         // Include ALL new blocks in the firehose message (like Python does)
         const firehoseBlockInserts = [
-            [Buffer.from(recordCid.bytes), recordBytes],
-            [Buffer.from(rootCid.bytes), rootSerialised],
-            [Buffer.from(commitCid.bytes), commitBytes]
+            [new Uint8Array(recordCid.bytes), new Uint8Array(recordBytes)],
+            [new Uint8Array(rootCid.bytes), new Uint8Array(rootSerialised)],
+            [new Uint8Array(commitCid.bytes), new Uint8Array(commitBytes)]
         ];
 
         // Get previous commit for prevData
@@ -406,7 +404,7 @@ class Repo extends EventEmitter {
                 path: fullKey,
                 action: "create"
             }],
-            seq: nextSeq,
+            seq: nextSeq,  // Use the same sequence number as the database
             rev: commit.rev,
             since: latestCommit ? dagCbor.decode(latestCommit.block_value).rev : null,
             prev: null,
@@ -417,7 +415,7 @@ class Repo extends EventEmitter {
             commit: commitCid,
             rebase: false,
             tooBig: false,
-            prevData: prevCommitData ? CID.parse(prevCommitData.data) : null
+            prevData: prevCommitData ? prevCommitData.data : null
         };
 
         // Concatenate the two parts like Python does
@@ -460,7 +458,7 @@ class Repo extends EventEmitter {
             const newCommitRev = tidNow();
             const commit = cleanObject({
                 version: 3,
-                data: rootCid.toString(),
+                data: rootCid,  // Use CID object, not string
                 rev: newCommitRev,
                 prev: null,
                 did: this.did
@@ -476,14 +474,13 @@ class Repo extends EventEmitter {
             
             // Prepare database block inserts
             const dbBlockInserts = [
-                [Buffer.from(rootCid.bytes), rootSerialised],
-                [Buffer.from(commitCid.bytes), commitBlob]
+                [new Uint8Array(rootCid.bytes), new Uint8Array(rootSerialised)],
+                [new Uint8Array(commitCid.bytes), new Uint8Array(commitBlob)]
             ];
-
-              // Calculate next sequence number before transaction
+            
+            // Calculate next sequence number before transaction
             const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
             const nextSeq = (row?.max_seq ?? -1) + 1;
-              
             
             // Generate CAR file bytes for blocks field
             const carBytes = await serialise([commitCid], dbBlockInserts);
@@ -501,7 +498,7 @@ class Repo extends EventEmitter {
                         action: "delete",
                         prev: existingCid
                     }],
-                    seq: nextSeq,
+                    seq: nextSeq,  // Use the same sequence number as the database
                     rev: newCommitRev,
                     since: prevCommitData.rev,
                     prev: prevCommitData.prev || null,
@@ -512,7 +509,7 @@ class Repo extends EventEmitter {
                     commit: commitCid.toString(),
                     rebase: false,
                     tooBig: false,
-                    prevData: prevCommitData ? CID.parse(prevCommitData.data) : null
+                    prevData: prevCommitData ? prevCommitData.data : null
                 })
             ]);
             
@@ -525,10 +522,6 @@ class Repo extends EventEmitter {
                 
                 // Delete record
                 this.con.prepare("DELETE FROM records WHERE rkey = ? AND collection = ?").run(rkey, collection);
-                
-                // Get the next commit sequence number
-                // const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
-                // const nextSeq = (row?.max_seq ?? -1) + 1;
                 
                 // Insert commit with the next sequence number
                 this.con.prepare("INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)").run(nextSeq, Buffer.from(commitCid.bytes), commitBlob);
@@ -806,7 +799,7 @@ class Repo extends EventEmitter {
         
         const body = {
             ops: ops,
-            seq: prevCommitSeq + 1,
+            seq: prevCommitSeq + 1,  // Use incrementing integer instead of timestamp
             rev: newCommitRev,
             since: prevCommit.rev,
             repo: this.did,
