@@ -55,22 +55,27 @@ function base32Encode(bytes) {
 }
 
 function tidNow() {
-    // Generate a simple valid TID that starts with [234567abcdefghij]
-    // Use current timestamp to ensure uniqueness
+    // Generate a proper timestamp-based TID matching the Go implementation
+    // TID format: 13 characters, base32 encoded timestamp with clock ID
     
     const now = Date.now();
-    const timestamp = now.toString(36); // Convert to base36 for shorter representation
+    const micros = now * 1000; // Convert to microseconds
+    const clockId = Math.floor(Math.random() * 1024); // 10-bit clock ID (0-1023)
     
-    // Start with a valid first character
-    const firstChar = B32_CHARSET[Math.floor(Math.random() * 16)]; // First 16 chars are valid
+    // Format: (timestamp << 10) | clockId
+    // Use a smaller timestamp range to avoid truncation
+    const timestamp = BigInt(micros) & BigInt(0x1F_FFFF_FFFF_FFFF); // 45 bits for timestamp
+    const value = (timestamp << BigInt(10)) | BigInt(clockId);
     
-    // Generate the rest of the TID
-    let rest = '';
-    for (let i = 0; i < 12; i++) {
-        rest += B32_CHARSET[Math.floor(Math.random() * B32_CHARSET.length)];
+    // Convert to base32 string
+    let s = "";
+    let v = value;
+    for (let i = 0; i < 13; i++) {
+        s = B32_CHARSET[Number(v & BigInt(0x1F))] + s;
+        v = v >> BigInt(5);
     }
     
-    return firstChar + rest;
+    return s;
 }
 
 async function hashToCid(data, codec = "dag-cbor") {
