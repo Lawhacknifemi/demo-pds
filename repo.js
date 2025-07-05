@@ -412,7 +412,7 @@ class Repo extends EventEmitter {
         ).get();
         
         const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
-
+        
         const body = {
             ops: [{
                 cid: recordCid,
