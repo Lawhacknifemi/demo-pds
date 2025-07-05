@@ -348,7 +348,11 @@ class Repo extends EventEmitter {
             [Buffer.from(rootCid.bytes), rootSerialised],
             [Buffer.from(commitCid.bytes), commitBytes]
         ];
-        
+       
+            // Calculate next sequence number before transaction
+        const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+        const nextSeq = (row?.max_seq ?? -1) + 1;
+            
         // Store blocks in database
         this.con.transaction(() => {
             // Store all blocks
@@ -366,8 +370,8 @@ class Repo extends EventEmitter {
             `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), Buffer.from(recordBytes));
             
             // Update commits table
-            const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
-            const nextSeq = (row?.max_seq ?? -1) + 1;
+            // const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+            // const nextSeq = (row?.max_seq ?? -1) + 1;
             this.con.prepare(
                 "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
             ).run(nextSeq, Buffer.from(commitCid.bytes), commitBytes);
@@ -402,7 +406,7 @@ class Repo extends EventEmitter {
                 path: fullKey,
                 action: "create"
             }],
-            seq: Math.floor(Date.now() * 1000000),
+            seq: nextSeq,
             rev: commit.rev,
             since: latestCommit ? dagCbor.decode(latestCommit.block_value).rev : null,
             prev: null,
@@ -475,6 +479,11 @@ class Repo extends EventEmitter {
                 [Buffer.from(rootCid.bytes), rootSerialised],
                 [Buffer.from(commitCid.bytes), commitBlob]
             ];
+
+              // Calculate next sequence number before transaction
+            const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+            const nextSeq = (row?.max_seq ?? -1) + 1;
+              
             
             // Generate CAR file bytes for blocks field
             const carBytes = await serialise([commitCid], dbBlockInserts);
@@ -492,7 +501,7 @@ class Repo extends EventEmitter {
                         action: "delete",
                         prev: existingCid
                     }],
-                    seq: Math.floor(Date.now() * 1000000),
+                    seq: nextSeq,
                     rev: newCommitRev,
                     since: prevCommitData.rev,
                     prev: prevCommitData.prev || null,
@@ -518,8 +527,8 @@ class Repo extends EventEmitter {
                 this.con.prepare("DELETE FROM records WHERE rkey = ? AND collection = ?").run(rkey, collection);
                 
                 // Get the next commit sequence number
-                const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
-                const nextSeq = (row?.max_seq ?? -1) + 1;
+                // const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+                // const nextSeq = (row?.max_seq ?? -1) + 1;
                 
                 // Insert commit with the next sequence number
                 this.con.prepare("INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)").run(nextSeq, Buffer.from(commitCid.bytes), commitBlob);
@@ -797,7 +806,7 @@ class Repo extends EventEmitter {
         
         const body = {
             ops: ops,
-            seq: Math.floor(Date.now() * 1000000),
+            seq: prevCommitSeq + 1,
             rev: newCommitRev,
             since: prevCommit.rev,
             repo: this.did,
