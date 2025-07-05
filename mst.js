@@ -319,20 +319,22 @@ function tupleRemoveAt(arr, index) {
                     throw new Error('Value cannot be undefined');
                 }
 
-                // If value is a CID, convert it to a proper format
+                // If value is a CID, use it directly (dagCbor will encode it as tag 42)
                 let serializedValue = value;
-                if (value instanceof CID) {
-                    serializedValue = {
-                        '/': value.toString()
-                    };
+                if (typeof value === 'string' && value.startsWith('bafy')) {
+                    try {
+                        serializedValue = CID.parse(value);
+                    } catch (e) {
+                        // Not a valid CID, keep as is
+                    }
                 }
 
-                // Create entry with proper CID format for subtree and convert Buffer to Uint8Array
+                // Create entry with proper CID objects (not strings)
                 const entry = {
                     k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
                     p: sharedPrefixLen,
-                    t: subtreeCid ? { '/': subtreeCid.toString() } : null,
-                    v: serializedValue
+                    t: subtreeCid, // Use CID object directly
+                    v: serializedValue // Use CID object directly if it's a CID
                 };
 
                 console.log('Created entry:', JSON.stringify(entry));
@@ -351,10 +353,10 @@ function tupleRemoveAt(arr, index) {
                 }
             }
 
-            // Create a valid empty node structure with proper CID format
+            // Create a valid empty node structure with proper CID objects
             const serializable = {
                 e: entries,
-                l: leftSubtreeCid ? { '/': leftSubtreeCid.toString() } : null
+                l: leftSubtreeCid // Use CID object directly
             };
 
             console.log('Serializable data:', JSON.stringify(serializable));
@@ -524,29 +526,22 @@ function tupleRemoveAt(arr, index) {
                 throw new Error('Value cannot be undefined');
             }
 
-            // If value is a CID, convert it to a proper format
+            // If value is a CID, use it directly (dagCbor will encode it as tag 42)
             let serializedValue = value;
-            if (value instanceof CID) {
-                serializedValue = {
-                    '/': value.toString()
-                };
-            } else if (typeof value === 'string' && value.startsWith('bafy')) {
+            if (typeof value === 'string' && value.startsWith('bafy')) {
                 try {
-                    const cid = CID.parse(value);
-                    serializedValue = {
-                        '/': cid.toString()
-                    };
+                    serializedValue = CID.parse(value);
                 } catch (e) {
                     // Not a valid CID, keep as is
                 }
             }
 
-            // Create entry with proper CID format for subtree and convert Buffer to Uint8Array
+            // Create entry with proper CID objects (not strings)
             const entry = {
                 k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
                 p: sharedPrefixLen,
-                t: subtreeCid ? { '/': subtreeCid.toString() } : null,
-                v: serializedValue
+                t: subtreeCid, // Use CID object directly
+                v: serializedValue // Use CID object directly if it's a CID
             };
 
             console.log('Created entry:', JSON.stringify(entry));
@@ -566,10 +561,10 @@ function tupleRemoveAt(arr, index) {
             }
         }
 
-        // Create a valid empty node structure with proper CID format
+        // Create a valid empty node structure with proper CID objects
         const serializable = {
             e: entries,
-            l: leftSubtreeCid ? { '/': leftSubtreeCid.toString() } : null
+            l: leftSubtreeCid // Use CID object directly
         };
 
         console.log('Serializable data:', JSON.stringify(serializable));
