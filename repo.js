@@ -323,7 +323,7 @@ class Repo extends EventEmitter {
         
         // Get the latest commit
         const latestCommit = this.con.prepare(
-            "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
         ).get();
         
         // Create new commit
@@ -332,7 +332,7 @@ class Repo extends EventEmitter {
             version: 3,
             data: await this.tree.getCid(),  // Use CID object, not string
             rev: newCommitRev,
-            prev: latestCommit ? latestCommit.block_value : null,
+            prev: latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null,
             did: this.did
         };
         
@@ -393,7 +393,7 @@ class Repo extends EventEmitter {
 
         // Get previous commit for prevData
         const prevCommit = this.con.prepare(
-            "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
         ).get();
         
         const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
@@ -449,7 +449,7 @@ class Repo extends EventEmitter {
             
             // Get previous commit
             const prevCommit = this.con.prepare(
-                "SELECT c.commit_seq, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+                "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
             ).get();
             
             const prevCommitData = dagCbor.decode(prevCommit.block_value);
