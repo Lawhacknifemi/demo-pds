@@ -430,7 +430,7 @@ class Repo extends EventEmitter {
             commit: commitCid,
             rebase: false,
             tooBig: false,
-            prevData: null
+            prevData: prevCommitData ? prevCommitData.data : null
         };
 
         // Concatenate the two parts like Python does
