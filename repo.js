@@ -412,7 +412,7 @@ class Repo extends EventEmitter {
         ).get();
         
         const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
-        
+
         const body = {
             ops: [{
                 cid: recordCid,
@@ -430,7 +430,7 @@ class Repo extends EventEmitter {
             commit: commitCid,
             rebase: false,
             tooBig: false,
-            prevData: prevCommitData ? prevCommitData.data : null
+            prevData: null
         };
 
         // Concatenate the two parts like Python does
