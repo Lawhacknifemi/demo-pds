@@ -336,11 +336,27 @@ class Repo extends EventEmitter {
         const rootSerialised = dagCbor.encode(nodeData);
         
         console.log('DEBUG: New MST root CID:', rootCid.toString());
-        
+        console.log('DEBUG: New MST root CBOR:', Buffer.from(rootSerialised).toString('hex'));
         // Get the latest commit
         const latestCommit = this.con.prepare(
             "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
         ).get();
+        
+        // Now you can safely use latestCommit
+        // Logging block
+        if (latestCommit && latestCommit.commit_cid) {
+            try {
+                const prevCommit = this.con.prepare("SELECT block_value FROM blocks WHERE block_cid = ?").get(latestCommit.commit_cid);
+                if (prevCommit && prevCommit.block_value) {
+                    const prevCommitObj = dagCbor.decode(new Uint8Array(prevCommit.block_value));
+                    if (prevCommitObj.data) {
+                        console.log('DEBUG: Prev MST root CID:', prevCommitObj.data.toString());
+                    }
+                }
+            } catch (e) {
+                console.log('DEBUG: Error logging prev commit MST root:', e);
+            }
+        }
         
         // Create new commit
         const newCommitRev = tidNow();
