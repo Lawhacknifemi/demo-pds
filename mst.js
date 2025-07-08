@@ -387,7 +387,7 @@ export class MST {
             i++;
         }
 
-        // Handle entries
+        // Fix: collect all leaves as separate entries in the same 'e' array
         for (; i < entries.length; i++) {
             const leaf = entries[i];
             if (!leaf.isLeaf()) {
@@ -395,9 +395,10 @@ export class MST {
             }
 
             let subtreeCid = null;
+            // Only set 't' if the next entry is a tree (right subtree)
             if (i + 1 < entries.length && entries[i + 1].isTree()) {
                 subtreeCid = await entries[i + 1].tree.getPointer();
-                i++;
+                // Do NOT increment i here; just set 't' for this entry
             }
 
             const prefixLen = countPrefixLen(lastKey, leaf.key);
@@ -420,7 +421,15 @@ export class MST {
             });
 
             lastKey = leaf.key;
+            // Do NOT increment i for a right subtree; all leaves must be included as separate entries
         }
+
+        // Debug print for nodeData structure
+        console.log('DEBUG: serializeNodeData nodeData =', JSON.stringify(nodeData, (key, value) => {
+            if (value && value.asCID) return value.toString();
+            if (value instanceof Uint8Array) return Array.from(value);
+            return value;
+        }, 2));
 
         return nodeData;
     }
