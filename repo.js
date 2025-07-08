@@ -207,7 +207,7 @@ class Repo extends EventEmitter {
                 
                 const commit = cleanObject({
                     version: 3,
-                    data: rootCid.toString(),
+                    data: rootCid,
                     rev: tidNow(),
                     did: repo.did,
                     prev: null
