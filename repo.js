@@ -4,7 +4,7 @@ import { sha256 } from 'multiformats/hashes/sha2';
 import { base32 } from 'multiformats/bases/base32';
 import Database from 'better-sqlite3';
 import { promisify } from 'util';
-import { MSTNode, MST, StrlenNode } from './mst.js';
+import { MST, MemoryStorage } from './mst.js';
 import { rawSign } from './signing.js';
 import { serialise } from './carfile.js';
 import { randomInt } from 'crypto';
@@ -146,11 +146,11 @@ class Repo extends EventEmitter {
         this.did = did;
         this.con = new Database(db);
         this.signingKey = signingKey;
-        this.tree = new MST(StrlenNode.emptyRoot());
+        this.tree = tree || MST.create(new MemoryStorage());
     }
 
     static async initialize(did, db, signingKey, tree) {
-        const repo = new Repo(did, db, signingKey, tree);
+        const repo = new Repo(did, db, signingKey, tree || MST.create(new MemoryStorage()));
         
         // Initialize database tables
         const statements = [
@@ -200,8 +200,10 @@ class Repo extends EventEmitter {
         if (!row) {
             try {
                 // Get the root node's CID and serialised data
-                const rootCid = await repo.tree.getCid();
-                const rootSerialised = await repo.tree.getSerialised();
+                const rootCid = await repo.tree.getPointer();
+                const entries = await repo.tree.getEntries();
+                const nodeData = await repo.tree.serializeNodeData(entries);
+                const rootSerialised = dagCbor.encode(nodeData);
                 
                 const commit = cleanObject({
                     version: 3,
@@ -325,11 +327,13 @@ class Repo extends EventEmitter {
         const recordCid = await hashToCid(recordBytes);
         
         // Update MST
-        this.tree = await this.tree.set(fullKey, recordCid);
+        this.tree = await this.tree.add(fullKey, recordCid);
         
         // Get the root CID and serialized data
-        const rootCid = await this.tree.getCid();
-        const rootSerialised = await this.tree.getSerialised();
+        const rootCid = await this.tree.getPointer();
+        const entries = await this.tree.getEntries();
+        const nodeData = await this.tree.serializeNodeData(entries);
+        const rootSerialised = dagCbor.encode(nodeData);
         
         console.log('DEBUG: New MST root CID:', rootCid.toString());
         
@@ -342,7 +346,7 @@ class Repo extends EventEmitter {
         const newCommitRev = tidNow();
         const commit = {
             version: 3,
-            data: await this.tree.getCid(),  // Use CID object, not string
+            data: await this.tree.getPointer(),  // Use CID object, not string
             rev: newCommitRev,
             prev: latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null,
             did: this.did
@@ -466,8 +470,10 @@ class Repo extends EventEmitter {
             this.tree = await this.tree.delete(recordKey);
             
             // Get the root CID and serialized data
-            const rootCid = await this.tree.getCid();
-            const rootSerialised = await this.tree.getSerialised();
+            const rootCid = await this.tree.getPointer();
+            const entries = await this.tree.getEntries();
+            const nodeData = await this.tree.serializeNodeData(entries);
+            const rootSerialised = dagCbor.encode(nodeData);
             
             // Get previous commit
             const prevCommit = this.con.prepare(
@@ -806,7 +812,7 @@ class Repo extends EventEmitter {
         // Create unsigned commit first (without signature)
         const unsignedCommit = {
             version: 3,
-            data: (await this.tree.getCid()).toString(),
+            data: (await this.tree.getPointer()).toString(),
             rev: newCommitRev,
             prev: prevCommitCid,
             did: this.did
