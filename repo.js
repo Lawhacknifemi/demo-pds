@@ -331,8 +331,7 @@ class Repo extends EventEmitter {
         const rootCid = await this.tree.getCid();
         const rootSerialised = await this.tree.getSerialised();
         
-        console.log('Root CID:', rootCid.toString());
-        console.log('Root serialised length:', rootSerialised.length);
+        console.log('DEBUG: New MST root CID:', rootCid.toString());
         
         // Get the latest commit
         const latestCommit = this.con.prepare(
@@ -348,6 +347,8 @@ class Repo extends EventEmitter {
             prev: latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null,
             did: this.did
         };
+        
+        console.log('DEBUG: Commit object:', commit);
         
         // Sign the commit
         const signature = await rawSign(this.signingKey, dagCbor.encode(commit));
@@ -412,6 +413,12 @@ class Repo extends EventEmitter {
         ).get();
         
         const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
+        
+        if (prevCommitData) {
+            console.log('DEBUG: prevData (previous MST root CID):', prevCommitData.data ? prevCommitData.data.toString() : null);
+        } else {
+            console.log('DEBUG: prevData (previous MST root CID): null');
+        }
 
         const body = {
             ops: [{

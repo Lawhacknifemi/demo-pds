@@ -1,762 +1,892 @@
-// mst.js - Complete working implementation of Merkle Search Tree
-
 import { CID } from 'multiformats/cid';
 import * as dagCbor from '@ipld/dag-cbor';
 import { sha256 } from 'multiformats/hashes/sha2';
+import { base32 } from 'multiformats/bases/base32';
+import Database from 'better-sqlite3';
+import { promisify } from 'util';
+import { MSTNode, MST, StrlenNode } from './mst.js';
+import { rawSign } from './signing.js';
+import { serialise } from './carfile.js';
+import { randomInt } from 'crypto';
+import { createHash } from 'crypto';
+import pkg from 'base64url';
+import winston from 'winston';
+import config from './config.js';
+import crypto from 'crypto';
+import { EventEmitter } from 'events';
+const { base64url } = pkg;
 
-/**
- * Helper function to create a CID from a buffer
- * @param {Uint8Array} bytes - The bytes to create a CID from
- * @returns {Promise<CID>} The created CID
- */
-async function hashToCid(bytes) {
-    const hash = await sha256.digest(bytes);
-    return CID.create(1, 0x71, hash);
-}
+// Initialize logging with Python-like format
+const logger = winston.createLogger({
+    level: 'debug',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.printf(({ level, message, timestamp }) => {
+            return `${timestamp} ${level.toUpperCase()}: ${message}`;
+        })
+    ),
+    transports: [
+        new winston.transports.Console()
+    ]
+});
 
-/**
- * Helper function to calculate shared prefix length between two buffers
- * @param {Buffer} a - First buffer
- * @param {Buffer} b - Second buffer
- * @returns {number} Length of shared prefix
- */
-function getSharedPrefixLength(a, b) {
-    let i = 0;
-    while (i < a.length && i < b.length && a[i] === b[i]) {
-        i++;
-    }
-    return i;
-}
+const B32_CHARSET = "234567abcdefghijklmnopqrstuvwxyz";
 
-/**
- * Helper function to replace an element in an array at a specific index
- * @param {Array} arr - Source array
- * @param {number} index - Index to replace
- * @param {*} value - New value
- * @returns {Array} New array with replaced value
- */
-function tupleReplaceAt(arr, index, value) {
-    const result = [...arr];
-    result[index] = value;
-    return Object.freeze(result);
-}
-
-/**
- * Helper function to insert an element in an array at a specific index
- * @param {Array} arr - Source array
- * @param {number} index - Index to insert at
- * @param {*} value - Value to insert
- * @returns {Array} New array with inserted value
- */
-function tupleInsertAt(arr, index, value) {
-    const result = [...arr.slice(0, index), value, ...arr.slice(index)];
-    return Object.freeze(result);
-}
-
-/**
- * Helper function to remove an element from an array at a specific index
- * @param {Array} arr - Source array
- * @param {number} index - Index to remove
- * @returns {Array} New array with removed value
- */
-function tupleRemoveAt(arr, index) {
-    const result = [...arr.slice(0, index), ...arr.slice(index + 1)];
-    return Object.freeze(result);
-  }
-  
-  /**
-   * Base MSTNode class - represents nodes in the Merkle Search Tree
- * @abstract
-   */
-  export class MSTNode {
-    /**
-     * @param {Array<MSTNode|null>} subtrees
-     * @param {Array<string>} keys
-     * @param {Array<any>} vals
-     * @throws {TypeError} If arguments are not arrays
-     * @throws {Error} If subtree count is invalid
-     * @throws {Error} If keys/vals lengths don't match
-     */
-    constructor(subtrees, keys, vals) {
-        if (!Array.isArray(subtrees) || !Array.isArray(keys) || !Array.isArray(vals)) {
-            throw new Error('All arguments must be arrays');
-        }
-        if (keys.length !== vals.length || subtrees.length !== keys.length + 1) {
-            throw new Error('Invalid array lengths');
-        }
-
-        // Validate that keys are in ascending order
-        for (let i = 1; i < keys.length; i++) {
-            if (keys[i] <= keys[i - 1]) {
-                throw new Error('Keys must be in ascending order');
-            }
-        }
-
-        this.subtrees = Object.freeze([...subtrees]);
-        this.keys = Object.freeze([...keys]);
-        this.vals = Object.freeze([...vals]);
+function base32Encode(bytes) {
+    let bits = 0;
+    let value = 0;
+    let output = '';
+    
+    for (let i = 0; i < bytes.length; i++) {
+        value = (value << 8) | bytes[i];
+        bits += 8;
         
-        // Private properties for caching
-        this._serialised = null;
-        this._cid = null;
+        while (bits >= 5) {
+            output += B32_CHARSET[(value >>> (bits - 5)) & 31];
+            bits -= 5;
+        }
     }
+    
+    if (bits > 0) {
+        output += B32_CHARSET[(value << (5 - bits)) & 31];
+    }
+    
+    return output;
+}
 
-    /**
-     * @abstract
-     * @param {string} key
-     * @returns {number}
-     * @throws {Error} If not implemented by subclass
-     */
-    static key_height(key) {
-        throw new Error('key_height must be implemented by subclass');
+function tidNow() {
+    // Generate a proper timestamp-based TID matching the Go implementation
+    // TID format: 13 characters, base32 encoded timestamp with clock ID
+    
+    const now = Date.now();
+    const micros = now * 1000; // Convert to microseconds
+    const clockId = Math.floor(Math.random() * 1024); // 10-bit clock ID (0-1023)
+    
+    // Format: (timestamp << 10) | clockId
+    // Use a smaller timestamp range to avoid truncation
+    const timestamp = BigInt(micros) & BigInt(0x1F_FFFF_FFFF_FFFF); // 45 bits for timestamp
+    const value = (timestamp << BigInt(10)) | BigInt(clockId);
+    
+    // Convert to base32 string
+    let s = "";
+    let v = value;
+    for (let i = 0; i < 13; i++) {
+        s = B32_CHARSET[Number(v & BigInt(0x1F))] + s;
+        v = v >> BigInt(5);
     }
+    
+    return s;
+}
 
-    /**
-     * @returns {MSTNode}
-     */
-    static emptyRoot() {
-        return new this([null], [], []);
-    }
+async function hashToCid(data, codec = "dag-cbor") {
+    const hash = await sha256.digest(data);
+    const cid = CID.create(1, codec === "dag-cbor" ? 0x71 : 0x55, hash);
+    return cid;
+}
 
-    /**
-     * @param {MSTNode|null} value
-     * @returns {MSTNode}
-     */
-    static _fromOptional(value) {
-      if (value === null) {
-            return this.emptyRoot();
-      }
-      return value;
+function dtToStr(dt) {
+    return dt.toISOString().replace('.000Z', 'Z');
+}
+
+function timestampStrNow() {
+    return dtToStr(new Date());
+}
+
+function enumerateRecordCids(obj) {
+    const cids = new Set();
+    function traverse(value) {
+        if (value === null || value === undefined) {
+            return;
+        }
+        if (typeof value === 'string' && value.startsWith('bafy')) {
+            try {
+                cids.add(CID.parse(value));
+            } catch (e) {
+                // Not a valid CID
+            }
+        } else if (Array.isArray(value)) {
+            value.forEach(traverse);
+        } else if (typeof value === 'object') {
+            Object.values(value).forEach(traverse);
+        }
     }
-  
-    /**
-     * @returns {MSTNode|null}
-     */
-    _toOptional() {
-      if (this.subtrees.length === 1 && this.subtrees[0] === null && this.keys.length === 0) {
+    traverse(obj);
+    return cids;
+}
+
+// Add this helper function before the Repo class
+function cleanObject(obj) {
+    if (obj === null || obj === undefined) {
         return null;
-      }
-      return this;
     }
-  
-    /**
-     * @param {Set<MSTNode>} created
-     * @returns {MSTNode}
-     */
-    _squashTop(created) {
-      if (this.keys.length) {
-        return this;
-      }
-      if (this.subtrees[0] === null) {
-        return this;
-      }
-      created.delete(this);
-        return this.subtrees[0]._squashTop(created);
+    if (typeof obj !== 'object') {
+        return obj;
     }
-  
-    /**
-     * @returns {number}
-     */
-    height() {
-      if (this.keys.length > 0) {
-        return this.constructor.key_height(this.keys[0]);
-      }
-      
-      if (this.subtrees[0] === null) {
-        return 0;
-      }
-      
-      return this.subtrees[0].height() + 1;
+    if (Array.isArray(obj)) {
+        return obj.map(cleanObject);
     }
-  
-    /**
-     * @param {string} key
-     * @returns {number}
-     */
-    _gteIndex(key) {
-      let i = 0;
-      while (i < this.keys.length && key > this.keys[i]) {
-        i++;
-      }
-      return i;
-    }
-  
-    /**
-     * @param {string} key_min
-     * @param {string} key_max
-     * @param {boolean} reverse
-     * @yields {[string, any]}
-     */
-    *get_range(key_min, key_max, reverse = false) {
-        const start = this._gteIndex(key_min);
-        const end = this._gteIndex(key_max);
-      
-      if (reverse) {
-        if (this.subtrees[end] !== null) {
-          yield* this.subtrees[end].get_range(key_min, key_max, reverse);
+    const cleaned = {};
+    for (const [key, value] of Object.entries(obj)) {
+        if (value !== undefined) {
+            cleaned[key] = cleanObject(value);
         }
-        for (let i = end - 1; i >= start; i--) {
-          yield [this.keys[i], this.vals[i]];
-          if (this.subtrees[i] !== null) {
-            yield* this.subtrees[i].get_range(key_min, key_max, reverse);
-          }
-        }
-      } else {
-        for (let i = start; i < end; i++) {
-          if (this.subtrees[i] !== null) {
-            yield* this.subtrees[i].get_range(key_min, key_max, reverse);
-          }
-          yield [this.keys[i], this.vals[i]];
-        }
-        if (this.subtrees[end] !== null) {
-          yield* this.subtrees[end].get_range(key_min, key_max, reverse);
-        }
-      }
     }
-  
-    /**
-     * @param {string} key
-     * @param {any} val
-     * @param {Set<MSTNode>} created
-     * @returns {Promise<MSTNode>}
-     */
-    async put(key, val, created = new Set()) {
-        console.log('Putting key:', key, 'value:', val, 'in node with keys:', this.keys);
+    return cleaned;
+}
+
+// Add this helper function before the Repo class
+function generateRkey() {
+    const bytes = crypto.randomBytes(8);
+    return base32Encode(bytes);
+}
+
+class Repo extends EventEmitter {
+    constructor(did, db, signingKey, tree) {
+        super(); // Call EventEmitter constructor
+        this.did = did;
+        this.con = new Database(db);
+        this.signingKey = signingKey;
+        this.tree = new MST(StrlenNode.emptyRoot());
+    }
+
+    static async initialize(did, db, signingKey, tree) {
+        const repo = new Repo(did, db, signingKey, tree);
         
-        if (this.keys.length === 0) {
-            console.log('Empty tree case, putting here');
-            return this._put_here(key, val, created);
+        // Initialize database tables
+        const statements = [
+            // Create tables if they don't exist
+            `CREATE TABLE IF NOT EXISTS blocks (
+                block_cid BLOB PRIMARY KEY NOT NULL,
+                block_value BLOB NOT NULL
+            )`,
+
+            `CREATE TABLE IF NOT EXISTS commits (
+                commit_seq INTEGER PRIMARY KEY NOT NULL,
+                commit_cid BLOB NOT NULL,
+                block_value BLOB NOT NULL
+            )`,
+
+            `CREATE TABLE IF NOT EXISTS blobs (
+                blob_cid BLOB PRIMARY KEY NOT NULL,
+                blob_data BLOB NOT NULL,
+                blob_refcount INTEGER NOT NULL DEFAULT 0
+            )`,
+
+            `CREATE TABLE IF NOT EXISTS repos (
+                did TEXT PRIMARY KEY NOT NULL,
+                root TEXT NOT NULL,
+                rev TEXT NOT NULL
+            )`,
+
+            `CREATE TABLE IF NOT EXISTS records (
+                rkey TEXT NOT NULL,
+                collection TEXT NOT NULL,
+                cid TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                commit_cid TEXT NOT NULL,
+                prev_cid TEXT,
+                data BLOB NOT NULL,
+                PRIMARY KEY (rkey, collection, repo)
+            )`
+        ];
+
+        // Execute each statement
+        for (const statement of statements) {
+            repo.con.prepare(statement).run();
         }
 
-        const keyHeight = this.constructor.key_height(key);
-        const treeHeight = this.height();
-        
-        if (keyHeight > treeHeight) {
-            // Need to grow the tree
-            const newRoot = new this.constructor(
-                [this],
-                [],
-                []
-            );
-            created.add(newRoot);
-            return await newRoot.put(key, val, created);
-        }
-        
-        if (keyHeight < treeHeight) {
-            // Need to look below
-            const i = this._gteIndex(key);
-            const newSubtrees = [...this.subtrees];
-            newSubtrees[i] = await this.constructor._fromOptional(newSubtrees[i]).put(key, val, created);
-            
-            const newNode = new this.constructor(
-                newSubtrees,
-                this.keys,
-                this.vals
-            );
-            created.add(newNode);
-            return newNode;
-        }
-        
-        // Can insert here
-        return this._put_here(key, val, created);
-    }
-
-    /**
-     * @param {string} key
-     * @param {any} val
-     * @param {Set<MSTNode>} created
-     * @returns {MSTNode}
-     */
-    async _put_here(key, val, created = new Set()) {
-        console.log('_put_here called with:', { key, val });
-        if (val === undefined) {
-            throw new Error('Value cannot be undefined');
-        }
-
-        const keyBytes = Buffer.from(key);
-        const insertionIndex = this.keys.findIndex(k => k > key);
-        console.log('Found insertion index:', insertionIndex);
-
-        if (insertionIndex === -1) {
-            // Key doesn't exist, create new node with updated arrays
-            console.log('Creating new node with key-value pair');
-            const newSubtrees = [...this.subtrees, null];
-            const newKeys = [...this.keys, key];
-            const newVals = [...this.vals, val];
-
-            console.log('New node data:', {
-                subtreesLength: newSubtrees.length,
-                keys: newKeys,
-                vals: newVals
-            });
-
-            // Create the node first
-            const node = new MSTNode(newSubtrees, newKeys, newVals);
-            console.log('Initializing node serialization');
-
-            // Initialize the node's serialized data
-            const entries = [];
-            let prevKey = Buffer.from('');
-
-            for (let i = 0; i < newKeys.length; i++) {
-                const keyBytes = Buffer.from(newKeys[i]);
-                const sharedPrefixLen = getSharedPrefixLength(prevKey, keyBytes);
+        // Create initial commit if needed
+        const row = repo.con.prepare("SELECT * FROM commits WHERE commit_seq=0").get();
+        if (!row) {
+            try {
+                // Get the root node's CID and serialised data
+                const rootCid = await repo.tree.getCid();
+                const rootSerialised = await repo.tree.getSerialised();
                 
-                // Get the subtree CID if it exists
-                let subtreeCid = null;
-                if (newSubtrees[i + 1]) {
-                    try {
-                        subtreeCid = await newSubtrees[i + 1].getCid();
-                    } catch (error) {
-                        console.error('Error getting subtree CID:', error);
-                        throw error;
-                    }
-                }
+                const commit = cleanObject({
+                    version: 3,
+                    data: rootCid.toString(),
+                    rev: tidNow(),
+                    did: repo.did,
+                    prev: null
+                });
+                
+                const commitBlob = dagCbor.encode(commit);
+                const commitCid = await hashToCid(commitBlob);
+                const sig = await rawSign(repo.signingKey, commitBlob);
+                commit.sig = sig;
 
-                // Ensure the value is not undefined and properly serialize CID
-                const value = newVals[i];
-                if (value === undefined) {
-                    throw new Error('Value cannot be undefined');
-                }
-
-                // If value is a CID, use it directly (dagCbor will encode it as tag 42)
-                let serializedValue = value;
-                if (typeof value === 'string' && value.startsWith('bafy')) {
-                    try {
-                        serializedValue = CID.parse(value);
-                    } catch (e) {
-                        // Not a valid CID, keep as is
-                    }
-                }
-
-                // Create entry with proper CID objects (not strings)
-                const entry = {
-                    k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
-                    p: sharedPrefixLen,
-                    t: subtreeCid, // Use CID object directly
-                    v: serializedValue // Use CID object directly if it's a CID
-                };
-
-                console.log('Created entry:', JSON.stringify(entry));
-                entries.push(entry);
-                prevKey = keyBytes;
-            }
-
-            // Get the left subtree CID if it exists
-            let leftSubtreeCid = null;
-            if (newSubtrees[0]) {
-                try {
-                    leftSubtreeCid = await newSubtrees[0].getCid();
-                } catch (error) {
-                    console.error('Error getting left subtree CID:', error);
-                    throw error;
-                }
-            }
-
-            // Create a valid empty node structure with proper CID objects
-            const serializable = {
-                e: entries,
-                l: leftSubtreeCid // Use CID object directly
-            };
-
-            console.log('Serializable data:', JSON.stringify(serializable));
-            try {
-                // Generate CID for the new node
-                const serialized = dagCbor.encode(serializable);
-                console.log('Serialized data length:', serialized.length);
-                const hash = await sha256.digest(serialized);
-                node._cid = CID.create(1, 0x71, hash);
-                node._serialised = serialized;
-                console.log('Generated CID for new node:', node._cid.toString());
+                repo.con.transaction(() => {
+                    repo.con.prepare(
+                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                    ).run(Buffer.from(rootCid.bytes), rootSerialised);
+                    
+                    repo.con.prepare(
+                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                    ).run(Buffer.from(commitCid.bytes), commitBlob);
+                    
+                    repo.con.prepare(
+                        "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
+                    ).run(0, Buffer.from(commitCid.bytes), commitBlob);
+                })();
             } catch (error) {
-                console.error('Error encoding serializable data:', error);
-                console.error('Serializable data:', serializable);
+                logger.error('Error creating initial commit:', error);
                 throw error;
             }
+        }
 
-            return node;
-        }
-        
-        // Key exists, replace value
-        console.log('Key exists, replacing value');
-        if (this.vals[insertionIndex] === val) {
-            console.log('Value unchanged, returning existing node');
-            return this;
-        }
-        
-        const newNode = new MSTNode(
-            this.subtrees,
-            this.keys,
-            tupleReplaceAt(this.vals, insertionIndex, val)
-        );
-        created.add(newNode);
-        return newNode;
+        return repo;
     }
 
-    /**
-     * @param {MSTNode|null} tree
-     * @param {string} key
-     * @param {Set<MSTNode>} created
-     * @returns {[MSTNode|null, MSTNode|null]}
-     */
-    static _splitOnKey(tree, key, created = new Set()) {
-      if (tree === null) {
-        return [null, null];
-      }
-      
-        const i = tree._gteIndex(key);
-        const [lsub, rsub] = this._splitOnKey(tree.subtrees[i], key, created);
+    async putRecord(record) {
+        const recordBytes = dagCbor.encode(record);
+        const recordCid = await hashToCid(recordBytes);
         
-        const left = new this(
-            [...tree.subtrees.slice(0, i), lsub],
-            tree.keys.slice(0, i),
-            tree.vals.slice(0, i)
-        )._toOptional();
-        
-        const right = new this(
-            [rsub, ...tree.subtrees.slice(i + 1)],
-            tree.keys.slice(i),
-            tree.vals.slice(i)
-        )._toOptional();
-      
-      if (left !== null) {
-        created.add(left);
-      }
-      if (right !== null) {
-        created.add(right);
-      }
-      
-      return [left, right];
+        return new Promise((resolve, reject) => {
+            this.con.transaction(() => {
+                this.con.prepare(
+                    "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                ).run(Buffer.from(recordCid.bytes), recordBytes);
+            });
+            resolve(recordCid);
+        });
     }
-  
-    /**
-     * @param {string} key
-     * @param {Set<MSTNode>} created
-     * @returns {MSTNode}
-     */
-    delete(key, created = new Set()) {
-        if (typeof key !== 'string') {
-            throw new Error('Key must be a string');
-        }
-        if (!(created instanceof Set)) {
-            throw new Error('created must be a Set');
+
+    async validateRecord(collection, record) {
+        console.log('Validating record:', { collection, record });
+        
+        if (!record || typeof record !== 'object') {
+            console.error('Invalid record:', record);
+            throw new Error('Invalid record: must be an object');
         }
 
-        const i = this._gteIndex(key);
+        // Basic validation for app.bsky.feed.post
+        if (collection === 'app.bsky.feed.post') {
+            if (!record.text || typeof record.text !== 'string') {
+                throw new Error('Invalid post: must have text field');
+            }
+            if (!record.createdAt || typeof record.createdAt !== 'string') {
+                throw new Error('Invalid post: must have createdAt field');
+            }
+            // Validate createdAt is a valid ISO date
+            try {
+                new Date(record.createdAt);
+            } catch (e) {
+                throw new Error('Invalid post: createdAt must be a valid ISO date');
+            }
+        }
+
+        return true;
+    }
+
+    async createRecord(collection, repo, record, rkey = null, validate = true) {
+        console.log('Starting createRecord:', { collection, repo, record, rkey, validate });
         
-        if (i >= this.keys.length || this.keys[i] !== key) {
-            throw new Error(`Key not found: ${key}`);
+        if (!record || typeof record !== 'object') {
+            console.error('Invalid record:', record);
+            throw new Error('Invalid record: must be an object');
+        }
+
+        if (!collection || typeof collection !== 'string') {
+            console.error('Invalid collection:', collection);
+            throw new Error('Invalid collection: must be a string');
+        }
+
+        if (!repo || typeof repo !== 'string') {
+            console.error('Invalid repo:', repo);
+            throw new Error('Invalid repo: must be a string');
+        }
+
+        const recordKey = rkey || tidNow();
+        const fullKey = `${collection}/${recordKey}`;
+        
+        if (validate) {
+            await this.validateRecord(collection, record);
         }
         
-        if (this.subtrees[0] === null) {
-            // Leaf node, delete here
-            return new MSTNode(
-                tupleRemoveAt(this.subtrees, i + 1),
-                tupleRemoveAt(this.keys, i),
-                tupleRemoveAt(this.vals, i)
+        // Handle blob references
+        const referencedBlobs = new Set();
+        if (record.blobs) {
+            for (const blob of record.blobs) {
+                if (blob.ref) {
+                    const blobCid = CID.parse(blob.ref.$link);
+                    referencedBlobs.add(blobCid);
+                    await this.increfBlob(blobCid);
+                }
+            }
+        }
+        
+        // Clean the record to remove any undefined values
+        const cleanedRecord = cleanObject(record);
+        console.log('Cleaned record:', cleanedRecord);
+        
+        // Encode the record
+        const recordBytes = dagCbor.encode(cleanedRecord);
+        const recordCid = await hashToCid(recordBytes);
+        
+        // Update MST
+        this.tree = await this.tree.set(fullKey, recordCid);
+        
+        // Get the root CID and serialized data
+        const rootCid = await this.tree.getCid();
+        const rootSerialised = await this.tree.getSerialised();
+        
+        console.log('DEBUG: New MST root CID:', rootCid.toString());
+        
+        // Get the latest commit
+        const latestCommit = this.con.prepare(
+            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+        ).get();
+        
+        // Create new commit
+        const newCommitRev = tidNow();
+        const commit = {
+            version: 3,
+            data: await this.tree.getCid(),  // Use CID object, not string
+            rev: newCommitRev,
+            prev: latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null,
+            did: this.did
+        };
+        
+        console.log('DEBUG: Commit object:', commit);
+        
+        // Sign the commit
+        const signature = await rawSign(this.signingKey, dagCbor.encode(commit));
+        commit.sig = signature;
+        
+        // Encode the signed commit
+        const commitBytes = dagCbor.encode(commit);
+        const commitCid = await hashToCid(commitBytes);
+        
+        // Prepare database block inserts
+        const dbBlockInserts = [
+            [Buffer.from(recordCid.bytes), recordBytes],
+            [Buffer.from(rootCid.bytes), rootSerialised],
+            [Buffer.from(commitCid.bytes), commitBytes]
+        ];
+        
+        // Calculate next sequence number before transaction
+        const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+        const nextSeq = (row?.max_seq ?? -1) + 1;
+        
+        // Store blocks in database
+        this.con.transaction(() => {
+            // Store all blocks
+            const stmt = this.con.prepare(
+                "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
             );
-        }
-        
-        // Internal node, recurse
-        const newSubtrees = [...this.subtrees];
-        newSubtrees[i] = this.subtrees[i].delete(key, created);
-        return new MSTNode(newSubtrees, this.keys, this.vals);
-    }
-
-    /**
-     * @returns {Promise<CID>}
-     */
-    async getCid() {
-        console.log('Getting CID for node');
-        if (this._cid) {
-            console.log('Using cached CID:', this._cid.toString());
-            return this._cid;
-        }
-
-        console.log('Generating new CID');
-        const serialized = await this.getSerialised();
-        console.log('Got serialized data, length:', serialized.length);
-
-        try {
-            const hash = await sha256.digest(serialized);
-            console.log('Generated hash:', hash.toString('hex'));
-            this._cid = CID.create(1, 0x71, hash);
-            console.log('Generated CID:', this._cid.toString());
-            return this._cid;
-        } catch (error) {
-            console.error('Error generating CID:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * @returns {Promise<Uint8Array>}
-     */
-    async getSerialised() {
-        console.log('Getting serialized data for node');
-        if (this._serialised) {
-            console.log('Using cached serialized data');
-            return this._serialised;
-        }
-
-        console.log('Generating new serialized data');
-        const entries = [];
-        let prevKey = Buffer.from('');
-
-        for (let i = 0; i < this.keys.length; i++) {
-            console.log('Processing entry:', i);
-            const keyBytes = Buffer.from(this.keys[i]);
-            const sharedPrefixLen = getSharedPrefixLength(prevKey, keyBytes);
+            for (const [cid, value] of dbBlockInserts) {
+                stmt.run(cid, value);
+            }
             
-            // Get the subtree CID if it exists
-            let subtreeCid = null;
-            if (this.subtrees[i + 1]) {
-                try {
-                    subtreeCid = await this.subtrees[i + 1].getCid();
-                    console.log('Got subtree CID:', subtreeCid.toString());
-                } catch (error) {
-                    console.error('Error getting subtree CID:', error);
-                    throw error;
-                }
-            }
+            // Update records table
+            this.con.prepare(`
+                INSERT INTO records (rkey, collection, cid, repo, commit_cid, prev_cid, data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), Buffer.from(recordBytes));
+            
+            // Update commits table
+            this.con.prepare(
+                "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
+            ).run(nextSeq, Buffer.from(commitCid.bytes), commitBytes);
+        })();
+        
+        // Update head
+        this.head = commitCid;
 
-            // Ensure the value is not undefined and properly serialize CID
-            const value = this.vals[i];
-            if (value === undefined) {
-                throw new Error('Value cannot be undefined');
-            }
+        // Create firehose message in Python format
+        const header = dagCbor.encode({
+            t: "#commit",
+            op: 1
+        });
 
-            // If value is a CID, use it directly (dagCbor will encode it as tag 42)
-            let serializedValue = value;
-            if (typeof value === 'string' && value.startsWith('bafy')) {
-                try {
-                    serializedValue = CID.parse(value);
-                } catch (e) {
-                    // Not a valid CID, keep as is
-                }
-            }
+        // Include ALL new blocks in the firehose message (like Python does)
+        const firehoseBlockInserts = [
+            [new Uint8Array(recordCid.bytes), new Uint8Array(recordBytes)],
+            [new Uint8Array(rootCid.bytes), new Uint8Array(rootSerialised)],
+            [new Uint8Array(commitCid.bytes), new Uint8Array(commitBytes)]
+        ];
 
-            // Create entry with proper CID objects (not strings)
-            const entry = {
-                k: new Uint8Array(keyBytes.slice(sharedPrefixLen)),
-                p: sharedPrefixLen,
-                t: subtreeCid, // Use CID object directly
-                v: serializedValue // Use CID object directly if it's a CID
-            };
-
-            console.log('Created entry:', JSON.stringify(entry));
-            entries.push(entry);
-            prevKey = keyBytes;
+        // Get previous commit for prevData
+        const prevCommit = this.con.prepare(
+            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+        ).get();
+        
+        const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
+        
+        if (prevCommitData) {
+            console.log('DEBUG: prevData (previous MST root CID):', prevCommitData.data ? prevCommitData.data.toString() : null);
+        } else {
+            console.log('DEBUG: prevData (previous MST root CID): null');
         }
 
-        // Get the left subtree CID if it exists
-        let leftSubtreeCid = null;
-        if (this.subtrees[0]) {
-            try {
-                leftSubtreeCid = await this.subtrees[0].getCid();
-                console.log('Got left subtree CID:', leftSubtreeCid.toString());
-            } catch (error) {
-                console.error('Error getting left subtree CID:', error);
-                throw error;
-            }
-        }
-
-        // Create a valid empty node structure with proper CID objects
-        const serializable = {
-            e: entries,
-            l: leftSubtreeCid // Use CID object directly
+        const body = {
+            ops: [{
+                cid: recordCid,
+                path: fullKey,
+                action: "create"
+            }],
+            seq: nextSeq,  // Use the same sequence number as the database
+            rev: commit.rev,
+            since: latestCommit ? dagCbor.decode(latestCommit.block_value).rev : null,
+            prev: null,
+            repo: this.did,
+            time: new Date().toISOString().replace('.000Z', 'Z'),
+            blobs: Array.from(referencedBlobs).map(cid => cid.bytes),
+            blocks: await serialise([commitCid], firehoseBlockInserts),
+            commit: commitCid,
+            rebase: false,
+            tooBig: false,
+            prevData: prevCommitData ? prevCommitData.data : null
         };
 
-        console.log('Serializable data:', JSON.stringify(serializable));
-        try {
-            // Generate CID for the new node
-            const serialized = dagCbor.encode(serializable);
-            console.log('Serialized data length:', serialized.length);
-            const hash = await sha256.digest(serialized);
-            this._cid = CID.create(1, 0x71, hash);
-            this._serialised = serialized;
-            console.log('Generated CID for new node:', this._cid.toString());
-            return this._serialised;
-        } catch (error) {
-            console.error('Error encoding serializable data:', error);
-            console.error('Serializable data:', serializable);
-            throw error;
-        }
-    }
-
-    // Helper method to check CID state
-    getCidState() {
+        // Concatenate the two parts like Python does
+        const firehoseMsg = Buffer.concat([header, dagCbor.encode(body)]);
+        
         return {
-            hasCid: !!this._cid,
-            cidValue: this._cid?.toString(),
-            hasSerialized: !!this._serialised,
-            serializedLength: this._serialised?.length,
-            keys: this.keys,
-            subtreesLength: this.subtrees.length
+            uri: `at://${repo}/${collection}/${recordKey}`,
+            cid: recordCid.toString(),
+            commitCid: commitCid.toString(),
+            firehoseMsg
         };
     }
 
-    // Helper method to verify CID
-    async verifyCid() {
-        console.log('Verifying CID for node with keys:', this.keys);
-        const state = this.getCidState();
-        console.log('Current state:', state);
-
-        if (!this._cid) {
-            console.log('No CID found, generating new one...');
-            await this.getCid();
-        }
-
-        // Verify the CID matches the serialized data
-        const serialized = await this.getSerialised();
-        const computedCid = await hashToCid(serialized);
-        
-        console.log('CID verification:', {
-            storedCid: this._cid.toString(),
-            computedCid: computedCid.toString(),
-            matches: this._cid.toString() === computedCid.toString()
-        });
-
-        return this._cid.toString() === computedCid.toString();
-    }
-
-    // Helper method to mark the node as needing CID recalculation
-    markOutdated() {
-        console.log('Marking node as outdated');
-        console.log('Previous state:', this.getCidState());
-        this._cid = null;
-        this._serialised = null;
-        console.log('New state:', this.getCidState());
-    }
-
-    static key_height() {
-        return 1; // For now, we're using a simple flat structure
-    }
-  }
-  
-  /**
-   * MST wrapper class for mutable interface
-   */
-export class MST {
-    constructor(root = null) {
-        this.root = root || MSTNode.emptyRoot();
-    }
-  
-    /**
-     * @param {typeof MSTNode} node_type
-     * @returns {MST}
-     */
-    static new_with(node_type) {
-        return new MST(node_type.emptyRoot());
-    }
-  
-    /**
-     * @returns {number}
-     */
-    height() {
-      return this.root.height();
-    }
-  
-    /**
-     * @param {string} key
-     * @param {any} val
-     * @returns {Promise<MST>}
-     */
-    async set(key, val) {
-        console.log('Setting key:', key, 'value:', val);
-        console.log('Current root state:', {
-            keys: this.root.keys,
-            vals: this.root.vals,
-            subtrees: this.root.subtrees.length
-        });
-
+    async deleteRecord(collection, rkey) {
         try {
-            const newRoot = await this.root.put(key, val, new Set());
-            console.log('Created new root');
-
-            // Ensure the new root has a CID and serialized data
-            try {
-                await newRoot.getCid();
-                await newRoot.getSerialised();
-                console.log('New root has CID and serialized data');
-            } catch (error) {
-                console.error('Error ensuring new root has CID and serialized data:', error);
-                throw error;
+            const recordKey = `${collection}/${rkey}`;
+            const [existingUri, existingCid, existingValue] = await this.getRecord(collection, rkey);
+            
+            // Handle blob references
+            const existingValueRecord = dagCbor.decode(existingValue);
+            for (const blob of enumerateRecordCids(existingValueRecord)) {
+                await this.decrefBlob(blob);
             }
+            
+            // Update MST
+            this.tree = await this.tree.delete(recordKey);
+            
+            // Get the root CID and serialized data
+            const rootCid = await this.tree.getCid();
+            const rootSerialised = await this.tree.getSerialised();
+            
+            // Get previous commit
+            const prevCommit = this.con.prepare(
+                "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+            ).get();
+            
+            const prevCommitData = dagCbor.decode(prevCommit.block_value);
+            
+            // Create new commit
+            const newCommitRev = tidNow();
+            const commit = cleanObject({
+                version: 3,
+                data: rootCid,  // Use CID object, not string
+                rev: newCommitRev,
+                prev: null,
+                did: this.did
+            });
+            
+            // Sign the commit
+            const commitSig = await rawSign(this.signingKey, dagCbor.encode(commit));
+            commit.sig = commitSig;
+            
+            // Encode the signed commit
+            const commitBytes = dagCbor.encode(commit);
+            const commitCid = await hashToCid(commitBytes);
+            
+            const commitBlob = dagCbor.encode(commit);
+            
+            // Prepare database block inserts
+            const dbBlockInserts = [
+                [new Uint8Array(rootCid.bytes), new Uint8Array(rootSerialised)],
+                [new Uint8Array(commitCid.bytes), new Uint8Array(commitBlob)]
+            ];
+            
+            // Calculate next sequence number before transaction
+            const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
+            const nextSeq = (row?.max_seq ?? -1) + 1;
+            
+            // Generate CAR file bytes for blocks field
+            const carBytes = await serialise([commitCid], dbBlockInserts);
+            
+            // Create firehose message
+            const firehoseBlob = Buffer.concat([
+                dagCbor.encode({
+                    t: "#commit",
+                    op: 1
+                }),
+                dagCbor.encode({
+                    ops: [{
+                        cid: null,
+                        path: recordKey,
+                        action: "delete",
+                        prev: existingCid
+                    }],
+                    seq: nextSeq,  // Use the same sequence number as the database
+                    rev: newCommitRev,
+                    since: prevCommitData.rev,
+                    prev: prevCommitData.prev || null,
+                    repo: this.did,
+                    time: new Date().toISOString().replace('.000Z', 'Z'),
+                    blobs: [],
+                    blocks: carBytes,
+                    commit: commitCid.toString(),
+                    rebase: false,
+                    tooBig: false,
+                    prevData: prevCommitData ? prevCommitData.data : null
+                })
+            ]);
+            
+            // Insert blocks into database
+            this.con.transaction(() => {
+                const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
+                for (const [cid, value] of dbBlockInserts) {
+                    stmt.run(cid, value);
+                }
+                
+                // Delete record
+                this.con.prepare("DELETE FROM records WHERE rkey = ? AND collection = ?").run(rkey, collection);
+                
+                // Insert commit with the next sequence number
+                this.con.prepare("INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)").run(nextSeq, Buffer.from(commitCid.bytes), commitBlob);
+            })();
+            
+            return firehoseBlob;
+        } catch (err) {
+            logger.error('Error in deleteRecord:', err);
+            throw err;
+        }
+    }
 
-            return new MST(newRoot);
+    async increfBlob(cid) {
+        this.con.prepare(
+            "UPDATE blobs SET blob_refcount = blob_refcount + 1 WHERE blob_cid = ?"
+        ).run(cid.toString());
+    }
+
+    async decrefBlob(cid) {
+        this.con.prepare(
+            "UPDATE blobs SET blob_refcount = blob_refcount - 1 WHERE blob_cid = ?"
+        ).run(cid.toString());
+        
+        this.con.prepare(
+            "DELETE FROM blobs WHERE blob_cid = ? AND blob_refcount < 1"
+        ).run(cid.toString());
+    }
+
+    async getRecord(collection, rkey) {
+        try {
+            const record = this.con.prepare(
+                'SELECT * FROM records WHERE collection = ? AND rkey = ?'
+            ).get(collection, rkey);
+            if (!record) {
+                throw new Error("record not found");
+            }
+            console.log('Record from DB:', {
+                collection: record.collection,
+                rkey: record.rkey,
+                dataType: typeof record.data,
+                isBuffer: Buffer.isBuffer(record.data),
+                dataLength: record.data ? record.data.length : 0,
+                dataSample: record.data ? record.data.slice(0, 32) : null
+            });
+            
+            // Convert Buffer to Uint8Array for dagCbor.decode
+            const uint8Array = new Uint8Array(record.data);
+            console.log('Converted to Uint8Array:', {
+                type: uint8Array.constructor.name,
+                length: uint8Array.length,
+                sample: Array.from(uint8Array.slice(0, 32))
+            });
+            
+            const decodedValue = dagCbor.decode(uint8Array);
+            console.log('Decoded value:', decodedValue);
+            
+            return [
+                `at://${record.repo}/${record.collection}/${record.rkey}`,
+                CID.parse(record.cid),
+                record.data
+            ];
         } catch (error) {
-            console.error('Error in set operation:', error);
+            logger.error('Error in getRecord:', error);
             throw error;
         }
     }
-  
-    /**
-     * @param {string} key
-     * @returns {Promise<MST>}
-     */
-    async delete(key) {
-        const created = new Set();
-        const newRoot = this.root.delete(key, created);
+
+    async getPreferences() {
+        const row = this.con.prepare(
+            "SELECT preferences_blob FROM preferences WHERE preferences_did = ?"
+        ).get(this.did);
+        return row ? row.preferences_blob : dagCbor.encode({ preferences: [] });
+    }
+
+    async putPreferences(blob) {
+        this.con.prepare(
+            "INSERT OR REPLACE INTO preferences (preferences_did, preferences_blob) VALUES (?, ?)"
+        ).run(this.did, blob);
+    }
+
+    async putBlob(data) {
+        const cid = await hashToCid(data);
         
-        // Ensure all created nodes have CIDs
-        for (const node of created) {
-            if (!node._cid) {
-                console.log('Computing CID for created node');
-                await node.getCid();
+        this.con.prepare(
+            "INSERT OR IGNORE INTO blobs (blob_cid, blob_data, blob_refcount) VALUES (?, ?, 0)"
+        ).run(cid.toString(), data);
+        
+        return {
+            ref: cid.toString(),
+            size: data.length,
+            mimeType: 'application/octet-stream'
+        };
+    }
+
+    async getBlob(cid) {
+        const row = this.con.prepare(
+            "SELECT blob_data FROM blobs WHERE blob_cid = ? AND blob_refcount > 0"
+        ).get(cid.toString());
+        if (!row) throw new Error("Blob not found");
+        return row.blob_data;
+    }
+
+    async getCheckout(commit = null) {
+        try {
+            // If no commit specified, get the latest commit
+            if (!commit) {
+                const latestCommit = this.con.prepare(
+                    "SELECT commit_seq, commit_cid FROM commits ORDER BY commit_seq DESC LIMIT 1"
+                ).get();
+                if (!latestCommit) {
+                    throw new Error("No commits found");
+                }
+                commit = CID.decode(latestCommit.commit_cid);
             }
+
+            // Get all blocks from the database
+            const blocks = this.con.prepare(
+                "SELECT block_cid, block_value FROM blocks"
+            ).all();
+
+            // Convert blocks to the format needed for CAR serialization
+            const carBlocks = blocks.map(row => [
+                Buffer.from(row.block_cid), // Use raw bytes for CID
+                row.block_value
+            ]);
+
+            // Serialize to CAR format using carfile.js
+            return serialise([commit], carBlocks);
+        } catch (err) {
+            logger.error('Error in getCheckout:', err);
+            throw err;
         }
+    }
+
+    async getRepo(did) {
+        try {
+            const repo = this.con.prepare(
+                'SELECT * FROM repos WHERE did = ?'
+            ).get(did);
+            if (!repo) {
+                return null;
+            }
+            return {
+                did,
+                root: repo.root,
+                rev: repo.rev
+            };
+        } catch (error) {
+            logger.error('Error in getRepo:', error);
+            throw error;
+        }
+    }
+
+    async getBlocks(did, cids) {
+        try {
+            const blocks = [];
+            for (const cid of cids) {
+                const block = await this.getBlock(cid);
+                if (block) {
+                    blocks.push({
+                        cid,
+                        data: block
+                    });
+                }
+            }
+            return blocks;
+        } catch (error) {
+            logger.error('Error in getBlocks:', error);
+            throw error;
+        }
+    }
+
+    async getCommitPath(did, latest, earliest) {
+        try {
+            const commits = this.con.prepare(
+                'SELECT * FROM commits WHERE did = ? AND rev <= ? AND rev >= ? ORDER BY rev DESC'
+            ).all(did, latest, earliest || 0);
+            
+            if (!commits.length) {
+                return null;
+            }
+            return commits.map(commit => ({
+                cid: commit.cid,
+                rev: commit.rev
+            }));
+        } catch (error) {
+            logger.error('Error in getCommitPath:', error);
+            throw error;
+        }
+    }
+
+    async listRepos(limit = 50, cursor = null) {
+        try {
+            const repos = this.con.prepare(
+                'SELECT * FROM repos WHERE did > ? ORDER BY did LIMIT ?'
+            ).all(cursor || '', limit);
+            
+            return {
+                repos: repos.map(repo => ({
+                    did: repo.did,
+                    root: repo.root,
+                    rev: repo.rev
+                })),
+                cursor: repos.length === limit ? repos[repos.length - 1].did : null
+            };
+        } catch (error) {
+            logger.error('Error in listRepos:', error);
+            throw error;
+        }
+    }
+
+    async notifyOfUpdate(hostname) {
+        try {
+            await this.con.run(
+                'INSERT OR REPLACE INTO updates (hostname, last_update) VALUES (?, ?)',
+                [hostname, Date.now()]
+            );
+        } catch (error) {
+            logger.error('Error in notifyOfUpdate:', error);
+            throw error;
+        }
+    }
+
+    async requestCrawl(hostname) {
+        try {
+            const update = this.con.prepare(
+                'SELECT * FROM updates WHERE hostname = ?'
+            ).get(hostname);
+            if (!update) {
+                return;
+            }
+            // Implement crawl logic here
+        } catch (error) {
+            logger.error('Error in requestCrawl:', error);
+            throw error;
+        }
+    }
+
+    async createCommit(collection, rkey, valueCid, referencedBlobs, dbBlockInserts) {
+        logger.info('Creating commit for record:', rkey);
+
+        const latestCommitStmt = this.con.prepare(`
+            SELECT c.commit_seq, b.block_value
+            FROM commits c
+            JOIN blocks b ON c.commit_cid = b.block_cid
+            ORDER BY c.commit_seq DESC
+            LIMIT 1
+        `);
+        const latestCommitResult = latestCommitStmt.get();
+        const prevCommitSeq = latestCommitResult.commit_seq;
+        const prevCommit = dagCbor.decode(latestCommitResult.block_value);
         
-        return new MST(newRoot);
-    }
-  
-    /**
-     * @param {string} key
-     * @returns {Promise<any>}
-     */
-    async get(key) {
-      return this.root.get(key);
-    }
-  
-    /**
-     * @param {string} key
-     * @returns {boolean}
-     */
-    has(key) {
-      return this.get(key, null) !== null;
-    }
-  
-    /**
-     * @param {string} key_min
-     * @param {string} key_max
-     * @param {boolean} reverse
-     * @returns {Generator<[string, any]>}
-     */
-    *get_range(key_min, key_max, reverse = false) {
-      yield* this.root.get_range(key_min, key_max, reverse);
+        // Get the previous commit CID as a CID object
+        const prevCommitCid = CID.decode(new Uint8Array(prevCommit.cid));
+        
+        const newCommitRev = tidNow();
+        
+        // Create unsigned commit first (without signature)
+        const unsignedCommit = {
+            version: 3,
+            data: (await this.tree.getCid()).toString(),
+            rev: newCommitRev,
+            prev: prevCommitCid,
+            did: this.did
+        };
+        
+        // Sign the unsigned commit
+        const signature = await this.signCommit(unsignedCommit);
+        
+        // Create the final commit with signature
+        const commit = {
+            ...unsignedCommit,
+            sig: signature
+        };
+        
+        const commitBytes = dagCbor.encode(commit);
+        const commitCid = await hashToCid(commitBytes);
+        dbBlockInserts.push([commitCid.bytes, commitBytes]);
+
+        const recordKey = `${collection}/${rkey}`;
+        const uri = `at://${this.did}/${recordKey}`;
+
+        // CONSTRUCT FIREHOSE MESSAGE LIKE PYTHON
+        const ops = [{ action: 'create', cid: valueCid, path: recordKey }];
+        const header = { t: '#commit', op: 1 };
+        
+        // Only serialize the commit block for the firehose message
+        const commitBlockInserts = [[commitCid.bytes, commitBytes]];
+        
+        const body = {
+            ops: ops,
+            seq: prevCommitSeq + 1,  // Use incrementing integer instead of timestamp
+            rev: newCommitRev,
+            since: prevCommit.rev,
+            repo: this.did,
+            time: timestampStrNow(),
+            blobs: Array.from(referencedBlobs).map(cid => cid.bytes),
+            blocks: await serialise([commitCid], commitBlockInserts),
+            commit: commitCid,
+            rebase: false,
+            tooBig: false,
+        };
+
+        const firehoseMsg = Buffer.concat([
+            dagCbor.encode(header),
+            dagCbor.encode(body)
+        ]);
+        
+        // Database updates
+        this.con.prepare('INSERT OR IGNORE INTO records (record_key, record_cid) VALUES (?, ?)').run(recordKey, valueCid.bytes);
+        const stmt = this.con.prepare('INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)');
+        for (const block of dbBlockInserts) {
+            stmt.run(block[0], block[1]);
+        }
+        this.con.prepare('INSERT INTO commits (commit_seq, commit_cid) VALUES (?, ?)').run(prevCommitSeq + 1, commitCid.bytes);
+
+        return { firehoseMsg, uri, cid: valueCid };
     }
 
-    /**
-     * @returns {Promise<CID>}
-     */
-    async getCid() {
-        return await this.root.getCid();
-    }
-
-    async getSerialised() {
-        return await this.root.getSerialised();
+    async signCommit(commit) {
+        logger.info('Signing commit');
+        
+        // Create a copy of the commit without the signature field
+        const unsignedCommit = {
+            version: commit.version,
+            data: commit.data,
+            rev: commit.rev,
+            prev: commit.prev,
+            did: commit.did
+        };
+        
+        // Encode the unsigned commit
+        const unsignedCommitBytes = dagCbor.encode(unsignedCommit);
+        
+        // Sign the unsigned commit bytes
+        const commitSig = await rawSign(this.signingKey, unsignedCommitBytes);
+        
+        logger.info('Commit signed successfully');
+        return commitSig;
     }
 }
-  
-  /**
-   * Example implementation
-   */
-export class StrlenNode extends MSTNode {
-    /**
-     * @param {string} key
-     * @returns {number}
-     */
-    static key_height(key) {
-      return key.length;
-    }
-  }
+
+// Export the Repo class and other required exports
+export { Repo, tidNow, hashToCid, dtToStr, timestampStrNow }; 
