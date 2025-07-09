@@ -200,14 +200,21 @@ class Repo extends EventEmitter {
         if (!row) {
             try {
                 // Get the root node's CID and serialised data
-                const rootCid = await repo.tree.getPointer();
                 const entries = await repo.tree.getEntries();
-                const nodeData = await repo.tree.serializeNodeData(entries);
-                const rootSerialised = dagCbor.encode(nodeData);
+                
+                // For initial commit, data should be null if MST is empty
+                let rootCid = null;
+                let rootSerialised = null;
+                
+                if (entries.length > 0) {
+                    rootCid = await repo.tree.getPointer();
+                    const nodeData = await repo.tree.serializeNodeData(entries);
+                    rootSerialised = dagCbor.encode(nodeData);
+                }
                 
                 const commit = cleanObject({
                     version: 3,
-                    data: rootCid,
+                    data: rootCid,  // This will be null for empty MST
                     rev: tidNow(),
                     did: repo.did,
                     prev: null
@@ -219,9 +226,12 @@ class Repo extends EventEmitter {
                 commit.sig = sig;
 
                 repo.con.transaction(() => {
-                    repo.con.prepare(
-                        "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
-                    ).run(Buffer.from(rootCid.bytes), rootSerialised);
+                    // Only insert root block if it exists (non-empty MST)
+                    if (rootCid && rootSerialised) {
+                        repo.con.prepare(
+                            "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                        ).run(Buffer.from(rootCid.bytes), rootSerialised);
+                    }
                     
                     repo.con.prepare(
                         "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
@@ -282,6 +292,7 @@ class Repo extends EventEmitter {
     }
 
     async createRecord(collection, repo, record, rkey = null, validate = true) {
+        console.log('=== CREATE RECORD START ===');
         console.log('Starting createRecord:', { collection, repo, record, rkey, validate });
         
         if (!record || typeof record !== 'object') {
@@ -325,6 +336,7 @@ class Repo extends EventEmitter {
         // Encode the record
         const recordBytes = dagCbor.encode(cleanedRecord);
         const recordCid = await hashToCid(recordBytes);
+        console.log('Record CID:', recordCid.toString());
         
         // Update MST
         this.tree = await this.tree.add(fullKey, recordCid);
@@ -337,46 +349,67 @@ class Repo extends EventEmitter {
         
         console.log('DEBUG: New MST root CID:', rootCid.toString());
         console.log('DEBUG: New MST root CBOR:', Buffer.from(rootSerialised).toString('hex'));
-        // Get the latest commit
+        
+        // Get the latest commit with detailed logging
+        console.log('=== FETCHING LATEST COMMIT ===');
         const latestCommit = this.con.prepare(
             "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
         ).get();
         
-        // Now you can safely use latestCommit
-        // Logging block
+        console.log('Latest commit from DB:', latestCommit);
+        
+        // Logging block for previous commit details
         if (latestCommit && latestCommit.commit_cid) {
             try {
                 const prevCommit = this.con.prepare("SELECT block_value FROM blocks WHERE block_cid = ?").get(latestCommit.commit_cid);
                 if (prevCommit && prevCommit.block_value) {
                     const prevCommitObj = dagCbor.decode(new Uint8Array(prevCommit.block_value));
+                    console.log('DEBUG: Previous commit object:', prevCommitObj);
                     if (prevCommitObj.data) {
                         console.log('DEBUG: Prev MST root CID:', prevCommitObj.data.toString());
+                    }
+                    if (prevCommitObj.prev) {
+                        console.log('DEBUG: Prev commit prev field:', prevCommitObj.prev.toString());
+                    } else {
+                        console.log('DEBUG: Prev commit prev field: null');
                     }
                 }
             } catch (e) {
                 console.log('DEBUG: Error logging prev commit MST root:', e);
             }
+        } else {
+            console.log('DEBUG: No previous commit found');
         }
         
-        // Create new commit
+        // Create new commit with proper prev field
         const newCommitRev = tidNow();
+        const prevCommitCid = latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null;
+        
+        console.log('=== CREATING NEW COMMIT ===');
+        console.log('Previous commit CID:', prevCommitCid ? prevCommitCid.toString() : 'null');
+        console.log('New commit rev:', newCommitRev);
+        
         const commit = {
             version: 3,
             data: await this.tree.getPointer(),  // Use CID object, not string
             rev: newCommitRev,
-            prev: latestCommit ? CID.decode(new Uint8Array(latestCommit.commit_cid)) : null,
+            prev: prevCommitCid,  // This should be the previous commit CID
             did: this.did
         };
         
-        console.log('DEBUG: Commit object:', commit);
+        console.log('DEBUG: Commit object before signing:', commit);
         
         // Sign the commit
         const signature = await rawSign(this.signingKey, dagCbor.encode(commit));
         commit.sig = signature;
         
+        console.log('DEBUG: Commit object after signing:', commit);
+        
         // Encode the signed commit
         const commitBytes = dagCbor.encode(commit);
         const commitCid = await hashToCid(commitBytes);
+        
+        console.log('DEBUG: New commit CID:', commitCid.toString());
         
         // Prepare database block inserts
         const dbBlockInserts = [
@@ -388,8 +421,10 @@ class Repo extends EventEmitter {
         // Calculate next sequence number before transaction
         const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
         const nextSeq = (row?.max_seq ?? -1) + 1;
+        console.log('DEBUG: Next sequence number:', nextSeq);
         
         // Store blocks in database
+        console.log('=== STORING IN DATABASE ===');
         this.con.transaction(() => {
             // Store all blocks
             const stmt = this.con.prepare(
@@ -403,7 +438,7 @@ class Repo extends EventEmitter {
             this.con.prepare(`
                 INSERT INTO records (rkey, collection, cid, repo, commit_cid, prev_cid, data)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.block_value?.toString(), Buffer.from(recordBytes));
+            `).run(recordKey, collection, recordCid.toString(), repo, commitCid.toString(), latestCommit?.commit_cid ? Buffer.from(latestCommit.commit_cid).toString('hex') : null, Buffer.from(recordBytes));
             
             // Update commits table
             this.con.prepare(
@@ -413,6 +448,7 @@ class Repo extends EventEmitter {
         
         // Update head
         this.head = commitCid;
+        console.log('DEBUG: Updated head to:', this.head.toString());
 
         // Create firehose message in Python format
         const header = dagCbor.encode({
@@ -463,6 +499,8 @@ class Repo extends EventEmitter {
         // Concatenate the two parts like Python does
         const firehoseMsg = Buffer.concat([header, dagCbor.encode(body)]);
         
+        console.log('=== CREATE RECORD END ===');
+        
         return {
             uri: `at://${repo}/${collection}/${recordKey}`,
             cid: recordCid.toString(),
@@ -472,9 +510,14 @@ class Repo extends EventEmitter {
     }
 
     async deleteRecord(collection, rkey) {
+        console.log('=== DELETE RECORD START ===');
+        console.log('Deleting record:', { collection, rkey });
+        
         try {
             const recordKey = `${collection}/${rkey}`;
             const [existingUri, existingCid, existingValue] = await this.getRecord(collection, rkey);
+            
+            console.log('Existing record found:', { uri: existingUri, cid: existingCid });
             
             // Handle blob references
             const existingValueRecord = dagCbor.decode(existingValue);
@@ -491,30 +534,48 @@ class Repo extends EventEmitter {
             const nodeData = await this.tree.serializeNodeData(entries);
             const rootSerialised = dagCbor.encode(nodeData);
             
-            // Get previous commit
+            console.log('DEBUG: New MST root CID after delete:', rootCid.toString());
+            
+            // Get previous commit with detailed logging
+            console.log('=== FETCHING LATEST COMMIT FOR DELETE ===');
             const prevCommit = this.con.prepare(
                 "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
             ).get();
             
-            const prevCommitData = dagCbor.decode(prevCommit.block_value);
+            console.log('Previous commit from DB:', prevCommit);
             
-            // Create new commit
+            const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
+            console.log('Previous commit data:', prevCommitData);
+            
+            // Create new commit with proper prev field
             const newCommitRev = tidNow();
+            const prevCommitCid = prevCommit ? CID.decode(new Uint8Array(prevCommit.commit_cid)) : null;
+            
+            console.log('=== CREATING DELETE COMMIT ===');
+            console.log('Previous commit CID:', prevCommitCid ? prevCommitCid.toString() : 'null');
+            console.log('New commit rev:', newCommitRev);
+            
             const commit = cleanObject({
                 version: 3,
                 data: rootCid,  // Use CID object, not string
                 rev: newCommitRev,
-                prev: null,
+                prev: prevCommitCid,  // Use the previous commit CID instead of null
                 did: this.did
             });
+            
+            console.log('DEBUG: Delete commit object before signing:', commit);
             
             // Sign the commit
             const commitSig = await rawSign(this.signingKey, dagCbor.encode(commit));
             commit.sig = commitSig;
             
+            console.log('DEBUG: Delete commit object after signing:', commit);
+            
             // Encode the signed commit
             const commitBytes = dagCbor.encode(commit);
             const commitCid = await hashToCid(commitBytes);
+            
+            console.log('DEBUG: Delete commit CID:', commitCid.toString());
             
             const commitBlob = dagCbor.encode(commit);
             
@@ -527,9 +588,31 @@ class Repo extends EventEmitter {
             // Calculate next sequence number before transaction
             const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
             const nextSeq = (row?.max_seq ?? -1) + 1;
+            console.log('DEBUG: Next sequence number for delete:', nextSeq);
             
             // Generate CAR file bytes for blocks field
             const carBytes = await serialise([commitCid], dbBlockInserts);
+            
+            // Store in database
+            console.log('=== STORING DELETE IN DATABASE ===');
+            this.con.transaction(() => {
+                // Store all blocks
+                const stmt = this.con.prepare(
+                    "INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)"
+                );
+                for (const [cid, value] of dbBlockInserts) {
+                    stmt.run(cid, value);
+                }
+                
+                // Update commits table
+                this.con.prepare(
+                    "INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)"
+                ).run(nextSeq, Buffer.from(commitCid.bytes), commitBytes);
+            })();
+            
+            // Update head
+            this.head = commitCid;
+            console.log('DEBUG: Updated head to:', this.head.toString());
             
             // Create firehose message
             const firehoseBlob = Buffer.concat([
@@ -546,8 +629,8 @@ class Repo extends EventEmitter {
                     }],
                     seq: nextSeq,  // Use the same sequence number as the database
                     rev: newCommitRev,
-                    since: prevCommitData.rev,
-                    prev: prevCommitData.prev || null,
+                    since: prevCommitData ? prevCommitData.rev : null,
+                    prev: prevCommitData ? prevCommitData.prev : null,
                     repo: this.did,
                     time: new Date().toISOString().replace('.000Z', 'Z'),
                     blobs: [],
@@ -559,24 +642,17 @@ class Repo extends EventEmitter {
                 })
             ]);
             
-            // Insert blocks into database
-            this.con.transaction(() => {
-                const stmt = this.con.prepare("INSERT OR IGNORE INTO blocks (block_cid, block_value) VALUES (?, ?)");
-                for (const [cid, value] of dbBlockInserts) {
-                    stmt.run(cid, value);
-                }
-                
-                // Delete record
-                this.con.prepare("DELETE FROM records WHERE rkey = ? AND collection = ?").run(rkey, collection);
-                
-                // Insert commit with the next sequence number
-                this.con.prepare("INSERT INTO commits (commit_seq, commit_cid, block_value) VALUES (?, ?, ?)").run(nextSeq, Buffer.from(commitCid.bytes), commitBlob);
-            })();
+            console.log('=== DELETE RECORD END ===');
             
-            return firehoseBlob;
-        } catch (err) {
-            logger.error('Error in deleteRecord:', err);
-            throw err;
+            return {
+                uri: existingUri,
+                cid: existingCid.toString(),
+                commitCid: commitCid.toString(),
+                firehoseMsg: firehoseBlob
+            };
+        } catch (error) {
+            console.error('Error in deleteRecord:', error);
+            throw error;
         }
     }
 

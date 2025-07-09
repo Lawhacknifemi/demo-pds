@@ -736,7 +736,40 @@ async function initServer() {
           try {
             const commits = repo.con.prepare("SELECT commit_seq, hex(commit_cid) FROM commits ORDER BY commit_seq").all();
             const blocks = repo.con.prepare("SELECT hex(block_cid), length(block_value) FROM blocks").all();
-            res.json({ commits, blocks });
+            
+            // Enhanced commit chain analysis
+            const commitChain = [];
+            for (const commit of commits) {
+              try {
+                const commitCid = Buffer.from(commit['hex(commit_cid)'], 'hex');
+                const blockValue = repo.con.prepare("SELECT block_value FROM blocks WHERE block_cid = ?").get(commitCid);
+                if (blockValue) {
+                  const commitObj = dagCbor.decode(new Uint8Array(blockValue.block_value));
+                  commitChain.push({
+                    seq: commit.commit_seq,
+                    cid: commit['hex(commit_cid)'],
+                    rev: commitObj.rev,
+                    prev: commitObj.prev ? commitObj.prev.toString() : 'null',
+                    data: commitObj.data ? (typeof commitObj.data === 'object' ? commitObj.data.toString() : commitObj.data) : 'null',
+                    did: commitObj.did
+                  });
+                }
+              } catch (e) {
+                commitChain.push({
+                  seq: commit.commit_seq,
+                  cid: commit['hex(commit_cid)'],
+                  error: e.message
+                });
+              }
+            }
+            
+            res.json({ 
+              commits, 
+              blocks,
+              commitChain,
+              totalCommits: commits.length,
+              totalBlocks: blocks.length
+            });
           } catch (e) {
             res.status(500).json({ error: e.message });
           }
