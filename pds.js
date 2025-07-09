@@ -732,6 +732,15 @@ async function initServer() {
         app.get('/xrpc/app.bsky.feed.getAuthorFeed', authenticated(bskyFeedGetAuthorFeed));
         app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
         app.post('/xrpc/com.atproto.sync.notifyOfUpdate', authenticated(syncNotifyOfUpdate));
+        app.get('/debug/db', async (req, res) => {
+          try {
+            const commits = repo.con.prepare("SELECT commit_seq, hex(commit_cid) FROM commits ORDER BY commit_seq").all();
+            const blocks = repo.con.prepare("SELECT hex(block_cid), length(block_value) FROM blocks").all();
+            res.json({ commits, blocks });
+          } catch (e) {
+            res.status(500).json({ error: e.message });
+          }
+        });
 
         // Create HTTP server
         const server = http.createServer(app);
