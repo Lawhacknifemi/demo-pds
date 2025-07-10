@@ -417,6 +417,18 @@ class Repo extends EventEmitter {
             [Buffer.from(rootCid.bytes), rootSerialised],
             [Buffer.from(commitCid.bytes), commitBytes]
         ];
+
+        // Collect all reachable MST nodes from the new root
+        const mstNodes = await this.tree.collectAllNodes();
+        for (const [cid, data] of mstNodes) {
+            if (
+                cid.equals(recordCid) ||
+                cid.equals(rootCid) ||
+                cid.equals(commitCid)
+            ) continue;
+            const bytes = dagCbor.encode(data);
+            dbBlockInserts.push([Buffer.from(cid.bytes), bytes]);
+        }
         
         // Calculate next sequence number before transaction
         const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
@@ -462,6 +474,16 @@ class Repo extends EventEmitter {
             [new Uint8Array(rootCid.bytes), new Uint8Array(rootSerialised)],
             [new Uint8Array(commitCid.bytes), new Uint8Array(commitBytes)]
         ];
+        // Add all reachable MST nodes to the firehose block list
+        for (const [cid, data] of mstNodes) {
+            if (
+                cid.equals(recordCid) ||
+                cid.equals(rootCid) ||
+                cid.equals(commitCid)
+            ) continue;
+            const bytes = dagCbor.encode(data);
+            firehoseBlockInserts.push([new Uint8Array(cid.bytes), new Uint8Array(bytes)]);
+        }
 
         // Get previous commit for prevData
         const prevCommit = this.con.prepare(

@@ -533,6 +533,27 @@ export class MST {
         return keys.sort();
     }
 
+    // Collect all reachable nodes from the current MST root (for CAR slice completeness)
+    async collectAllNodes() {
+        const seen = new Set();
+        const nodes = [];
+        async function walk(node) {
+            const pointer = await node.getPointer();
+            if (seen.has(pointer.toString())) return;
+            seen.add(pointer.toString());
+            const entries = await node.getEntries();
+            const nodeData = await node.serializeNodeData(entries);
+            nodes.push([pointer, nodeData]);
+            for (const entry of entries) {
+                if (entry.isTree()) {
+                    await walk(entry.tree);
+                }
+            }
+        }
+        await walk(this);
+        return nodes;
+    }
+
     // Structure validation: checks for adjacent tree nodes, key order, and duplicates
     verifyStructure() {
         function checkNode(node, lastKey = null) {
