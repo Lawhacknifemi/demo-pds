@@ -403,18 +403,16 @@ export class MST {
      * @returns {Promise<Object>} Serialized data
      */
     async serializeNodeData(entries) {
-        const nodeData = {
-            e: [], // entries
-            l: null // left subtree
-        };
-
+        // Build entries array and left pointer
         let i = 0;
         let lastKey = '';
         let lastWasLeaf = false;
+        let entriesArray = [];
+        let leftPointer = null;
 
         // Handle left subtree
         if (entries.length > 0 && entries[0].isTree()) {
-            nodeData.l = await entries[0].tree.getPointer();
+            leftPointer = await entries[0].tree.getPointer();
             i++;
             lastWasLeaf = false;
         }
@@ -431,7 +429,7 @@ export class MST {
                         valueToStore = CID.parse(entry.val);
                     } catch (e) {}
                 }
-                nodeData.e.push({
+                entriesArray.push({
                     p: prefixLen,
                     k: new TextEncoder().encode(keySuffix),
                     v: valueToStore,
@@ -441,12 +439,11 @@ export class MST {
                 lastWasLeaf = true;
             } else if (entry.isTree()) {
                 // Tree after a leaf: set as right subtree for previous entry
-                if (!lastWasLeaf || nodeData.e.length === 0) {
-                    // Two trees in a row or tree after tree: invalid
+                if (!lastWasLeaf || entriesArray.length === 0) {
                     console.error('serializeNodeData: entries =', entries.map(e => ({ kind: e.kind, key: e.key })));
                     throw new Error('Invalid node structure: tree in invalid position');
                 }
-                nodeData.e[nodeData.e.length - 1].t = await entry.tree.getPointer();
+                entriesArray[entriesArray.length - 1].t = await entry.tree.getPointer();
                 lastWasLeaf = false;
             } else {
                 // Undefined or invalid entry
@@ -456,32 +453,36 @@ export class MST {
         }
 
         // Debug print for nodeData structure
-        console.log('DEBUG: serializeNodeData nodeData =', JSON.stringify(nodeData, (key, value) => {
+        console.log('DEBUG: serializeNodeData nodeData =', JSON.stringify([entriesArray, leftPointer], (key, value) => {
             if (value && value.asCID) return value.toString();
             if (value instanceof Uint8Array) return Array.from(value);
             return value;
         }, 2));
 
-        return nodeData;
+        // Use CBOR array [entriesArray, leftPointer]
+        return [entriesArray, leftPointer];
     }
 
     /**
      * Deserialize node data from CBOR format
-     * @param {Object} data - Serialized data
+     * @param {Object} data - Serialized data (now an array)
      * @returns {Promise<NodeEntry[]>} Deserialized entries
      */
     async deserializeNodeData(data) {
+        // data is now an array: [entriesArray, leftPointer]
+        const entriesArray = data[0] || [];
+        const leftPointer = data[1] || null;
         const entries = [];
         let lastKey = '';
 
         // Handle left subtree
-        if (data.l) {
-            const leftTree = await MST.load(this.storage, data.l);
+        if (leftPointer) {
+            const leftTree = await MST.load(this.storage, leftPointer);
             entries.push(new NodeEntry('tree', '', null, leftTree));
         }
 
         // Handle entries
-        for (const entry of data.e) {
+        for (const entry of entriesArray) {
             const keySuffix = new TextDecoder().decode(entry.k);
             const key = lastKey.slice(0, entry.p) + keySuffix;
 
