@@ -270,8 +270,6 @@ export class MST {
         let newEntries = [...entries];
         newEntries.splice(index, 0, newLeaf);
         newEntries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
-        this.setEntries(newEntries);
-
         console.log('DEBUG: addToLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
         return new MST(this.storage, newEntries, this.layer, this.fanout);
     }
@@ -302,7 +300,6 @@ export class MST {
             newEntries.splice(index, 0, new NodeEntry('tree', '', null, newSubtree));
         }
         newEntries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
-        this.setEntries(newEntries);
         console.log('DEBUG: addToLowerLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
         return new MST(this.storage, newEntries, this.layer, this.fanout);
     }
@@ -354,14 +351,14 @@ export class MST {
         if (rightTrees.length > 0) {
             rightTree = await mergeTrees(rightTrees, this.storage, keyZeros, this.fanout);
         }
-        newEntries = [];
-        if (leftTree) newEntries.push(new NodeEntry('tree', '', null, leftTree));
-        newEntries.push(...leaves);
-        if (rightTree) newEntries.push(new NodeEntry('tree', '', null, rightTree));
+        let mergedEntries = [];
+        if (leftTree) mergedEntries.push(new NodeEntry('tree', '', null, leftTree));
+        mergedEntries.push(...leaves);
+        if (rightTree) mergedEntries.push(new NodeEntry('tree', '', null, rightTree));
         // After mutation, merge adjacent trees
-        this.entries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
-        console.log('DEBUG: addToHigherLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
-        return new MST(this.storage, newEntries, keyZeros, this.fanout);
+        mergedEntries = await mergeAdjacentTrees(mergedEntries, this.storage, this.layer, this.fanout);
+        console.log('DEBUG: addToHigherLayer newEntries:', mergedEntries.map(e => ({kind: e.kind, key: e.key})));
+        return new MST(this.storage, mergedEntries, keyZeros, this.fanout);
     }
 
     /**
