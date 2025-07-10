@@ -429,6 +429,20 @@ class Repo extends EventEmitter {
             const bytes = dagCbor.encode(data);
             dbBlockInserts.push([Buffer.from(cid.bytes), bytes]);
         }
+
+        // Include the previous root node for inversion (if it exists)
+        if (prevCommitData && prevCommitData.data) {
+            try {
+                // Get the previous root's data from storage
+                const prevRootData = await this.tree.storage.get(prevCommitData.data);
+                if (prevRootData) {
+                    const prevRootBytes = dagCbor.encode(prevRootData);
+                    dbBlockInserts.push([Buffer.from(prevCommitData.data.bytes), prevRootBytes]);
+                }
+            } catch (e) {
+                console.log('DEBUG: Could not include previous root node:', e.message);
+            }
+        }
         
         // Calculate next sequence number before transaction
         const row = this.con.prepare("SELECT MAX(commit_seq) as max_seq FROM commits").get();
@@ -483,6 +497,19 @@ class Repo extends EventEmitter {
             ) continue;
             const bytes = dagCbor.encode(data);
             firehoseBlockInserts.push([new Uint8Array(cid.bytes), new Uint8Array(bytes)]);
+        }
+
+        // Include the previous root node in firehose blocks for inversion (if it exists)
+        if (prevCommitData && prevCommitData.data) {
+            try {
+                const prevRootData = await this.tree.storage.get(prevCommitData.data);
+                if (prevRootData) {
+                    const prevRootBytes = dagCbor.encode(prevRootData);
+                    firehoseBlockInserts.push([new Uint8Array(prevCommitData.data.bytes), new Uint8Array(prevRootBytes)]);
+                }
+            } catch (e) {
+                console.log('DEBUG: Could not include previous root node in firehose:', e.message);
+            }
         }
 
         // Get previous commit for prevData
