@@ -411,6 +411,19 @@ class Repo extends EventEmitter {
         
         console.log('DEBUG: New commit CID:', commitCid.toString());
         
+        // Get previous commit for prevData (moved up to fix initialization order)
+        const prevCommit = this.con.prepare(
+            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
+        ).get();
+        
+        const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
+        
+        if (prevCommitData) {
+            console.log('DEBUG: prevData (previous MST root CID):', prevCommitData.data ? prevCommitData.data.toString() : null);
+        } else {
+            console.log('DEBUG: prevData (previous MST root CID): null');
+        }
+        
         // Prepare database block inserts
         const dbBlockInserts = [
             [Buffer.from(recordCid.bytes), recordBytes],
@@ -510,19 +523,6 @@ class Repo extends EventEmitter {
             } catch (e) {
                 console.log('DEBUG: Could not include previous root node in firehose:', e.message);
             }
-        }
-
-        // Get previous commit for prevData
-        const prevCommit = this.con.prepare(
-            "SELECT c.commit_seq, c.commit_cid, b.block_value FROM commits c INNER JOIN blocks b ON b.block_cid=c.commit_cid ORDER BY c.commit_seq DESC LIMIT 1"
-        ).get();
-        
-        const prevCommitData = prevCommit ? dagCbor.decode(prevCommit.block_value) : null;
-        
-        if (prevCommitData) {
-            console.log('DEBUG: prevData (previous MST root CID):', prevCommitData.data ? prevCommitData.data.toString() : null);
-        } else {
-            console.log('DEBUG: prevData (previous MST root CID): null');
         }
 
         const body = {
