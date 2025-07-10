@@ -200,6 +200,14 @@ export class MST {
     }
 
     /**
+     * Set entries (for internal use after mutation)
+     * @param {NodeEntry[]} entries - The new entries array
+     */
+    setEntries(entries) {
+        this.entries = entries;
+    }
+
+    /**
      * Get pointer (CID) for this MST node
      * @returns {Promise<CID>} Node CID
      */
@@ -259,29 +267,13 @@ export class MST {
             throw new Error(`Value already set at key: ${newLeaf.key}`);
         }
 
-        const prevNode = index > 0 ? entries[index - 1] : new NodeEntry('undefined');
+        let newEntries = [...entries];
+        newEntries.splice(index, 0, newLeaf);
+        newEntries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
+        this.setEntries(newEntries);
 
-        if (prevNode.isUndefined() || prevNode.isLeaf()) {
-            // Simple insertion
-            const newEntries = [...entries];
-            newEntries.splice(index, 0, newLeaf);
-            return new MST(this.storage, newEntries, this.layer, this.fanout);
-        } else {
-            // Need to split subtree
-            const [left, right] = await prevNode.tree.splitAround(newLeaf.key);
-            const newEntries = [...entries];
-            newEntries.splice(index - 1, 1);
-            
-            if (left) {
-                newEntries.splice(index - 1, 0, new NodeEntry('tree', '', null, left));
-            }
-            newEntries.splice(index, 0, newLeaf);
-            if (right) {
-                newEntries.splice(index + 1, 0, new NodeEntry('tree', '', null, right));
-            }
-            
-            return new MST(this.storage, newEntries, this.layer, this.fanout);
-        }
+        console.log('DEBUG: addToLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
+        return new MST(this.storage, newEntries, this.layer, this.fanout);
     }
 
     /**
@@ -296,19 +288,23 @@ export class MST {
         const index = this.findGtOrEqualLeafIndex(entries, key);
         const prevNode = index > 0 ? entries[index - 1] : new NodeEntry('undefined');
 
+        let newEntries;
         if (prevNode.isTree()) {
             // Add to existing subtree
             const newSubtree = await prevNode.tree.add(key, val, keyZeros);
-            const newEntries = [...entries];
+            newEntries = [...entries];
             newEntries[index - 1] = new NodeEntry('tree', '', null, newSubtree);
-            return new MST(this.storage, newEntries, this.layer, this.fanout);
         } else {
             // Create new subtree
-            const newSubtree = await MST.create(this.storage).add(key, val, keyZeros);
-            const newEntries = [...entries];
+            const subtree = new MST(this.storage, [], this.layer - 1, this.fanout);
+            const newSubtree = await subtree.add(key, val, keyZeros);
+            newEntries = [...entries];
             newEntries.splice(index, 0, new NodeEntry('tree', '', null, newSubtree));
-            return new MST(this.storage, newEntries, this.layer, this.fanout);
         }
+        newEntries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
+        this.setEntries(newEntries);
+        console.log('DEBUG: addToLowerLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
+        return new MST(this.storage, newEntries, this.layer, this.fanout);
     }
 
     /**
@@ -322,7 +318,7 @@ export class MST {
         const [left, right] = await this.splitAround(key);
         const newLeaf = new NodeEntry('leaf', key, val);
 
-        const newEntries = [];
+        let newEntries = [];
         if (left) {
             newEntries.push(new NodeEntry('tree', '', null, left));
         }
@@ -330,7 +326,41 @@ export class MST {
         if (right) {
             newEntries.push(new NodeEntry('tree', '', null, right));
         }
-
+        // Strictly enforce: [at most one left tree], [leaves...], [at most one right tree]
+        let leftTrees = [];
+        let rightTrees = [];
+        let leaves = [];
+        let foundLeaf = false;
+        for (let i = 0; i < newEntries.length; i++) {
+            const entry = newEntries[i];
+            if (entry.isTree()) {
+                if (!foundLeaf) {
+                    leftTrees.push(entry);
+                } else {
+                    rightTrees.push(entry);
+                }
+            } else if (entry.isLeaf()) {
+                foundLeaf = true;
+                leaves.push(entry);
+            }
+        }
+        // Merge left trees if more than one
+        let leftTree = null;
+        if (leftTrees.length > 0) {
+            leftTree = await mergeTrees(leftTrees, this.storage, keyZeros, this.fanout);
+        }
+        // Merge right trees if more than one
+        let rightTree = null;
+        if (rightTrees.length > 0) {
+            rightTree = await mergeTrees(rightTrees, this.storage, keyZeros, this.fanout);
+        }
+        newEntries = [];
+        if (leftTree) newEntries.push(new NodeEntry('tree', '', null, leftTree));
+        newEntries.push(...leaves);
+        if (rightTree) newEntries.push(new NodeEntry('tree', '', null, rightTree));
+        // After mutation, merge adjacent trees
+        this.entries = await mergeAdjacentTrees(newEntries, this.storage, this.layer, this.fanout);
+        console.log('DEBUG: addToHigherLayer newEntries:', newEntries.map(e => ({kind: e.kind, key: e.key})));
         return new MST(this.storage, newEntries, keyZeros, this.fanout);
     }
 
@@ -380,48 +410,49 @@ export class MST {
 
         let i = 0;
         let lastKey = '';
+        let lastWasLeaf = false;
 
         // Handle left subtree
         if (entries.length > 0 && entries[0].isTree()) {
             nodeData.l = await entries[0].tree.getPointer();
             i++;
+            lastWasLeaf = false;
         }
 
-        // Fix: collect all leaves as separate entries in the same 'e' array
         for (; i < entries.length; i++) {
-            const leaf = entries[i];
-            if (!leaf.isLeaf()) {
-                throw new Error('Invalid node structure');
-            }
-
-            let subtreeCid = null;
-            // Only set 't' if the next entry is a tree (right subtree)
-            if (i + 1 < entries.length && entries[i + 1].isTree()) {
-                subtreeCid = await entries[i + 1].tree.getPointer();
-                // Do NOT increment i here; just set 't' for this entry
-            }
-
-            const prefixLen = countPrefixLen(lastKey, leaf.key);
-            const keySuffix = leaf.key.slice(prefixLen);
-
-            let valueToStore = leaf.val;
-            if (typeof leaf.val === 'string' && leaf.val.match(/^bafy[a-z0-9]+$/)) {
-                try {
-                    valueToStore = CID.parse(leaf.val);
-                } catch (e) {
-                    // Not a valid CID, keep as is
+            const entry = entries[i];
+            if (entry.isLeaf()) {
+                // Add leaf entry
+                const prefixLen = countPrefixLen(lastKey, entry.key);
+                const keySuffix = entry.key.slice(prefixLen);
+                let valueToStore = entry.val;
+                if (typeof entry.val === 'string' && entry.val.match(/^bafy[a-z0-9]+$/)) {
+                    try {
+                        valueToStore = CID.parse(entry.val);
+                    } catch (e) {}
                 }
+                nodeData.e.push({
+                    p: prefixLen,
+                    k: new TextEncoder().encode(keySuffix),
+                    v: valueToStore,
+                    t: null
+                });
+                lastKey = entry.key;
+                lastWasLeaf = true;
+            } else if (entry.isTree()) {
+                // Tree after a leaf: set as right subtree for previous entry
+                if (!lastWasLeaf || nodeData.e.length === 0) {
+                    // Two trees in a row or tree after tree: invalid
+                    console.error('serializeNodeData: entries =', entries.map(e => ({ kind: e.kind, key: e.key })));
+                    throw new Error('Invalid node structure: tree in invalid position');
+                }
+                nodeData.e[nodeData.e.length - 1].t = await entry.tree.getPointer();
+                lastWasLeaf = false;
+            } else {
+                // Undefined or invalid entry
+                console.error('serializeNodeData: entries =', entries.map(e => ({ kind: e.kind, key: e.key })));
+                throw new Error('Invalid node structure: undefined entry');
             }
-
-            nodeData.e.push({
-                p: prefixLen,
-                k: new TextEncoder().encode(keySuffix),
-                v: valueToStore,
-                t: subtreeCid
-            });
-
-            lastKey = leaf.key;
-            // Do NOT increment i for a right subtree; all leaves must be included as separate entries
         }
 
         // Debug print for nodeData structure
@@ -504,6 +535,35 @@ export class MST {
         });
         return keys.sort();
     }
+
+    // Structure validation: checks for adjacent tree nodes, key order, and duplicates
+    verifyStructure() {
+        function checkNode(node, lastKey = null) {
+            let lastWasTree = false;
+            let prevKey = lastKey;
+            let keys = [];
+            for (let i = 0; i < node.entries.length; i++) {
+                const entry = node.entries[i];
+                if (entry.isTree() && entry.isTree()) {
+                    if (lastWasTree) throw new Error('Adjacent tree nodes found');
+                    lastWasTree = true;
+                    if (entry.tree) {
+                        const childKeys = checkNode(entry.tree, prevKey);
+                        if (childKeys.length > 0) prevKey = childKeys[childKeys.length - 1];
+                        keys = keys.concat(childKeys);
+                    }
+                } else if (entry.isLeaf() && entry.isLeaf()) {
+                    lastWasTree = false;
+                    if (prevKey !== null && entry.key < prevKey) throw new Error('Keys out of order');
+                    if (keys.includes(entry.key)) throw new Error('Duplicate key in tree');
+                    keys.push(entry.key);
+                    prevKey = entry.key;
+                }
+            }
+            return keys;
+        }
+        checkNode(this);
+    }
 }
 
 /**
@@ -529,4 +589,75 @@ export class MemoryStorage {
         }
         return entry.data;
     }
+  }
+
+// Helper to recursively merge multiple trees into a valid MST
+async function mergeTrees(trees, storage, layer, fanout) {
+    if (trees.length === 0) return null;
+    if (trees.length === 1) return trees[0].tree;
+    // Start with the first tree
+    let merged = trees[0].tree;
+    for (let i = 1; i < trees.length; i++) {
+        const entries = await trees[i].tree.getEntries();
+        for (const entry of entries) {
+            if (entry.isLeaf()) {
+                merged = await merged.add(entry.key, entry.val);
+            } else if (entry.isTree()) {
+                // Recursively merge subtrees
+                const subtree = entry.tree;
+                const subEntries = await subtree.getEntries();
+                for (const subEntry of subEntries) {
+                    if (subEntry.isLeaf()) {
+                        merged = await merged.add(subEntry.key, subEntry.val);
+                    } else if (subEntry.isTree()) {
+                        // Recursively merge deeper
+                        merged = await mergeTrees([new NodeEntry('tree', '', null, subEntry.tree)], storage, layer, fanout);
+                    }
+                }
+            }
+        }
+    }
+    return merged;
+}
+
+// Recursively merge adjacent tree (child) nodes in the entries array
+async function mergeAdjacentTrees(entries, storage, layer, fanout) {
+  if (!entries.length) return entries;
+  let out = [];
+  let i = 0;
+  while (i < entries.length) {
+    if (entries[i].isTree()) {
+      // Start of a run of tree nodes
+      let trees = [entries[i]];
+      let j = i + 1;
+      while (j < entries.length && entries[j].isTree()) {
+        trees.push(entries[j]);
+        j++;
+      }
+      if (trees.length === 1) {
+        out.push(trees[0]);
+      } else {
+        // Recursively merge all trees into one
+        let merged = trees[0].tree;
+        for (let k = 1; k < trees.length; k++) {
+          // Insert all leaves from trees[k] into merged
+          const ents = await trees[k].tree.getEntries();
+          for (const entry of ents) {
+            if (entry.isLeaf()) {
+              merged = await merged.add(entry.key, entry.val);
+            } else if (entry.isTree()) {
+              // Recursively merge subtrees
+              merged = await mergeAdjacentTrees([new NodeEntry('tree', '', null, merged), entry], storage, layer - 1, fanout)[0].tree;
+            }
+          }
+        }
+        out.push(new NodeEntry('tree', '', null, merged));
+      }
+      i = j;
+    } else {
+      out.push(entries[i]);
+      i++;
+    }
+  }
+  return out;
 }
