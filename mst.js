@@ -403,7 +403,6 @@ export class MST {
      * @returns {Promise<Object>} Serialized data
      */
     async serializeNodeData(entries) {
-        // Build entries array and left pointer
         let i = 0;
         let lastKey = '';
         let lastWasLeaf = false;
@@ -453,25 +452,25 @@ export class MST {
         }
 
         // Debug print for nodeData structure
-        console.log('DEBUG: serializeNodeData nodeData =', JSON.stringify([entriesArray, leftPointer], (key, value) => {
+        console.log('DEBUG: serializeNodeData nodeData =', JSON.stringify({ e: entriesArray, l: leftPointer }, (key, value) => {
             if (value && value.asCID) return value.toString();
             if (value instanceof Uint8Array) return Array.from(value);
             return value;
         }, 2));
 
-        // Use CBOR array [entriesArray, leftPointer]
-        return [entriesArray, leftPointer];
+        // Use CBOR map {e: entriesArray, l: leftPointer}
+        return { e: entriesArray, l: leftPointer };
     }
 
     /**
      * Deserialize node data from CBOR format
-     * @param {Object} data - Serialized data (now an array)
+     * @param {Object} data - Serialized data (CBOR map)
      * @returns {Promise<NodeEntry[]>} Deserialized entries
      */
     async deserializeNodeData(data) {
-        // data is now an array: [entriesArray, leftPointer]
-        const entriesArray = data[0] || [];
-        const leftPointer = data[1] || null;
+        // data is a map: {e: entriesArray, l: leftPointer}
+        const entriesArray = data.e || [];
+        const leftPointer = data.l || null;
         const entries = [];
         let lastKey = '';
 
