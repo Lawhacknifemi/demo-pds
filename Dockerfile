@@ -29,31 +29,8 @@ RUN chown -R appuser:appuser /app && \
 
 USER appuser
 
-# Create a startup script with improved error handling
-RUN echo '#!/bin/bash\n\
-# Check if we need to create identity\n\
-if [ ! -f "privkey.pem" ] || ! grep -q "DID_PLC" config.js; then\n\
-    echo "Creating new identity..."\n\
-    # Run create_did.js and capture the DID\n\
-    DID=$(node create_did.js | grep "Generated DID:" | cut -d" " -f3)\n\
-    if [ -n "$DID" ]; then\n\
-        echo "Updating config.js with DID: $DID"\n\
-        # Update config.js with the new DID\n\
-        sed -i "s/DID_PLC = .*/DID_PLC = \"$DID\";/" config.js\n\
-        # Set permissions for newly created files\n\
-        chmod 644 privkey.pem\n\
-        # Run request_crawl.js after successful identity creation\n\
-        node request_crawl.js\n\
-    else\n\
-        echo "Failed to create identity"\n\
-        exit 1\n\
-    fi\n\
-else\n\
-    echo "Using existing identity..."\n\
-fi\n\
-\n\
-# Start the PDS\n\
-exec node pds.js' > /app/start.sh && \
+# Simple startup script: just run the PDS
+RUN echo '#!/bin/bash\necho "Starting PDS..."\nexec node pds.js' > /app/start.sh && \
 chmod +x /app/start.sh
 
 # Expose the port the app runs on
