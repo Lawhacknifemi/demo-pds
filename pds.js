@@ -775,6 +775,38 @@ async function initServer() {
                 res.status(500).json({ error: err.message });
             }
         });
+        app.get('/xrpc/com.atproto.repo.describeRepo', async (req, res) => {
+            try {
+                const { repo: repoDid } = req.query;
+                if (!repoDid) {
+                    return res.status(400).json({ error: 'Missing repo parameter' });
+                }
+                if (repoDid !== config.DID_PLC && repoDid !== config.HANDLE) {
+                    return res.status(404).json({ error: 'Repo not found' });
+                }
+                // Try to fetch the DID doc from /.well-known/atproto-did
+                let didDoc = null;
+                try {
+                    const resp = await fetch(`https://${config.PDS_SERVER}/.well-known/atproto-did`);
+                    if (resp.ok) {
+                        didDoc = await resp.text();
+                    }
+                } catch (e) {
+                    // ignore
+                }
+                const collections = await repo.listCollections();
+                res.json({
+                    handle: config.HANDLE,
+                    did: config.DID_PLC,
+                    didDoc,
+                    collections,
+                    handleIsCorrect: true
+                });
+            } catch (err) {
+                logger.error('Error in describeRepo endpoint:', err);
+                res.status(500).json({ error: err.message });
+            }
+        });
         app.get('/debug/db', async (req, res) => {
           try {
             const commits = repo.con.prepare("SELECT commit_seq, hex(commit_cid) FROM commits ORDER BY commit_seq").all();
