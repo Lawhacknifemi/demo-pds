@@ -732,6 +732,33 @@ async function initServer() {
         app.get('/xrpc/app.bsky.feed.getAuthorFeed', authenticated(bskyFeedGetAuthorFeed));
         app.get('/xrpc/app.bsky.actor.getProfile', authenticated(bskyActorGetProfile));
         app.post('/xrpc/com.atproto.sync.notifyOfUpdate', authenticated(syncNotifyOfUpdate));
+        app.get('/xrpc/com.atproto.repo.listRecords', async (req, res) => {
+            try {
+                const { repo: repoDid, collection, limit, cursor, reverse } = req.query;
+                if (!repoDid || !collection) {
+                    return res.status(400).json({ error: 'Missing repo or collection parameter' });
+                }
+                if (repoDid !== config.DID_PLC) {
+                    return res.status(404).json({ error: 'Repo not found' });
+                }
+                const records = await repo.listRecordsForCollection({
+                    collection,
+                    limit: limit ? parseInt(limit) : 50,
+                    cursor: cursor || null,
+                    reverse: reverse === 'true'
+                });
+                const lastRecord = records[records.length - 1];
+                const lastUri = lastRecord ? lastRecord.uri : undefined;
+                const lastRkey = lastUri ? lastUri.split('/').pop() : undefined;
+                res.json({
+                    records,
+                    cursor: lastRkey
+                });
+            } catch (err) {
+                logger.error('Error in listRecords endpoint:', err);
+                res.status(500).json({ error: err.message });
+            }
+        });
         app.get('/debug/db', async (req, res) => {
           try {
             const commits = repo.con.prepare("SELECT commit_seq, hex(commit_cid) FROM commits ORDER BY commit_seq").all();

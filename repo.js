@@ -1033,6 +1033,35 @@ class Repo extends EventEmitter {
         logger.info('Commit signed successfully');
         return commitSig;
     }
+
+    // List records for a collection, with pagination and reverse
+    async listRecordsForCollection({ collection, limit = 50, cursor = null, reverse = false }) {
+        try {
+            let query = 'SELECT * FROM records WHERE collection = ?';
+            let params = [collection];
+            if (cursor) {
+                query += reverse ? ' AND rkey > ?' : ' AND rkey < ?';
+                params.push(cursor);
+            }
+            query += ' ORDER BY rkey ' + (reverse ? 'ASC' : 'DESC');
+            query += ' LIMIT ?';
+            params.push(limit);
+            const rows = this.con.prepare(query).all(...params);
+            return rows.map(row => {
+                // Convert Buffer to Uint8Array for dagCbor.decode
+                const uint8Array = new Uint8Array(row.data);
+                const value = dagCbor.decode(uint8Array);
+                return {
+                    uri: `at://${row.repo}/${row.collection}/${row.rkey}`,
+                    cid: row.cid,
+                    value
+                };
+            });
+        } catch (error) {
+            logger.error('Error in listRecordsForCollection:', error);
+            throw error;
+        }
+    }
 }
 
 // Export the Repo class and other required exports
