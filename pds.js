@@ -759,6 +759,22 @@ async function initServer() {
                 res.status(500).json({ error: err.message });
             }
         });
+        app.get('/xrpc/com.atproto.repo.listCollections', async (req, res) => {
+            try {
+                const { repo: repoDid } = req.query;
+                if (!repoDid) {
+                    return res.status(400).json({ error: 'Missing repo parameter' });
+                }
+                if (repoDid !== config.DID_PLC) {
+                    return res.status(404).json({ error: 'Repo not found' });
+                }
+                const collections = await repo.listCollections();
+                res.json({ collections });
+            } catch (err) {
+                logger.error('Error in listCollections endpoint:', err);
+                res.status(500).json({ error: err.message });
+            }
+        });
         app.get('/debug/db', async (req, res) => {
           try {
             const commits = repo.con.prepare("SELECT commit_seq, hex(commit_cid) FROM commits ORDER BY commit_seq").all();

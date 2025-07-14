@@ -1062,6 +1062,17 @@ class Repo extends EventEmitter {
             throw error;
         }
     }
+
+    // List all unique collections in the repo
+    async listCollections() {
+        try {
+            const rows = this.con.prepare('SELECT DISTINCT collection FROM records').all();
+            return rows.map(row => row.collection);
+        } catch (error) {
+            logger.error('Error in listCollections:', error);
+            throw error;
+        }
+    }
 }
 
 // Export the Repo class and other required exports
